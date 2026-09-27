@@ -10,6 +10,7 @@ packages = [{include = "devp"}]
 [tool.poetry.dependencies]
 python = "^3.11"
 textual = "^8.2.8"
+croniter = "^6.2.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"

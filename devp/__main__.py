@@ -10,7 +10,7 @@ from rich.panel import Panel
 
 from devp.app import DevpApp
 from devp.config import ConfigError, load_config
-from devp.process import ProcessManager
+from devp.manager import ProcessManager
 
 _console = Console(stderr=True)
 
@@ -20,12 +20,12 @@ def main() -> None:
     config_path = Path.cwd() / "devp.toml"
 
     try:
-        configs = load_config(config_path)
+        config = load_config(config_path)
     except ConfigError as exc:
         _print_config_error(exc)
         raise SystemExit(1) from exc
 
-    manager = ProcessManager(configs)
+    manager = ProcessManager(config)
     app = DevpApp(manager)
     app.run()
 

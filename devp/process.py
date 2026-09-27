@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 from collections import deque
@@ -15,19 +16,36 @@ from devp.config import ProcessConfig
 _IS_WINDOWS = sys.platform == "win32"
 _MAX_BUFFER_LINES = 5000
 _STOP_TIMEOUT = 5.0
+_BASE_RESTART_DELAY = 1.0
+_MAX_RESTART_DELAY = 30.0
 
 OutputCallback = Callable[[str, str], None]
 StateCallback = Callable[[str, "ProcessState"], None]
 ErrorCallback = Callable[[str, str], None]
 
 
+def _has_console() -> bool:
+    """Whether this process has a real Windows console attached.
+
+    CTRL_BREAK_EVENT can only be delivered through a console; some hosts (certain
+    task runners, detached services) have none, in which case there's no point
+    attempting it before falling back to a hard kill.
+    """
+    if not _IS_WINDOWS:
+        return False
+    import ctypes
+
+    return bool(ctypes.windll.kernel32.GetConsoleWindow())
+
+
 class ProcessState(Enum):
-    """Lifecycle states of a single managed process."""
+    """Lifecycle states of a single managed process or cron job."""
 
     STOPPED = auto()
     RUNNING = auto()
     STOPPING = auto()
     CRASHED = auto()
+    SCHEDULED = auto()  # cron job: enabled and idle, waiting for its next scheduled run
 
 
 class ManagedProcess:
@@ -51,6 +69,8 @@ class ManagedProcess:
         self._proc: asyncio.subprocess.Process | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._wait_task: asyncio.Task[None] | None = None
+        self._restart_task: asyncio.Task[None] | None = None
+        self._crash_count = 0
 
     def _set_state(self, state: ProcessState) -> None:
         """Update state and notify `on_state_change`, if set."""
@@ -64,6 +84,17 @@ class ManagedProcess:
         if self.on_error is not None:
             self.on_error(self.config.name, message)
 
+    def log(self, line: str) -> None:
+        """Append an arbitrary line (e.g. a run separator) to the buffer without spawning anything."""
+        self.output.append(line)
+        if self.on_output is not None:
+            self.on_output(self.config.name, line)
+
+    async def wait(self) -> None:
+        """Wait for the current run to finish, if one is in progress."""
+        if self._wait_task is not None:
+            await self._wait_task
+
     async def start(self) -> None:
         """Spawn the process if not already running.
 
@@ -73,6 +104,10 @@ class ManagedProcess:
         """
         if self.state == ProcessState.RUNNING:
             return
+
+        if self._restart_task is not None:
+            self._restart_task.cancel()
+            self._restart_task = None
 
         env = {**os.environ, **self.config.env}
         popen_kwargs: dict[str, object] = {
@@ -126,13 +161,39 @@ class ManagedProcess:
         if self.state == ProcessState.STOPPING:
             self._set_state(ProcessState.STOPPED)
         elif returncode == 0:
+            self._crash_count = 0
             self._set_state(ProcessState.STOPPED)
         else:
             self._set_state(ProcessState.CRASHED)
             self._report_error(f"exited with code {returncode}")
+            if self.config.autorestart:
+                self._schedule_restart()
+
+    def _schedule_restart(self) -> None:
+        """Schedule an autorestart after an exponential backoff (capped at `_MAX_RESTART_DELAY`)."""
+        self._crash_count += 1
+        delay = min(_BASE_RESTART_DELAY * (2 ** (self._crash_count - 1)), _MAX_RESTART_DELAY)
+        self.log(f"--- autorestart in {delay:.0f}s (crash #{self._crash_count}) ---")
+        self._restart_task = asyncio.create_task(self._delayed_restart(delay))
+
+    async def _delayed_restart(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        self._restart_task = None
+        await self.start()
 
     async def stop(self, timeout: float = _STOP_TIMEOUT) -> None:
-        """Terminate the process, escalating to a hard kill after `timeout` seconds."""
+        """Terminate the process, escalating to a hard kill after `timeout` seconds.
+
+        Also cancels a pending autorestart, even if nothing is currently running, so
+        stopping a crashed process prevents it from coming back on its own.
+        """
+        if self._restart_task is not None:
+            self._restart_task.cancel()
+            self._restart_task = None
+
         if self._proc is None or self.state not in (ProcessState.RUNNING, ProcessState.STOPPING):
             return
 
@@ -151,33 +212,42 @@ class ManagedProcess:
             await self._wait_task
 
     def _terminate(self) -> None:
-        """Ask the process (and its group, on POSIX) to exit gracefully."""
+        """Ask the process to exit gracefully: SIGTERM on POSIX, CTRL_BREAK_EVENT on Windows.
+
+        CTRL_BREAK_EVENT relies on the child having been spawned into its own process
+        group (see `start()`), on a console being attached to send it through, and on
+        the child handling the signal (Python, Node, and most well-behaved console
+        apps do). Without a console, or if sending it fails outright, fall back to an
+        immediate hard kill instead of waiting out the full stop timeout for nothing.
+        """
         assert self._proc is not None
         if _IS_WINDOWS:
-            self._windows_kill(force=False)
+            if not _has_console():
+                self._windows_force_kill()
+                return
+            try:
+                self._proc.send_signal(signal.CTRL_BREAK_EVENT)
+            except (ProcessLookupError, OSError, ValueError):
+                self._windows_force_kill()
         else:
             try:
-                os.killpg(os.getpgid(self._proc.pid), 15)  # SIGTERM
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
 
     def _kill(self) -> None:
-        """Forcibly kill the process (and its group, on POSIX)."""
+        """Forcibly kill the process (and its group on POSIX; its process tree on Windows)."""
         assert self._proc is not None
         if _IS_WINDOWS:
-            self._windows_kill(force=True)
+            self._windows_force_kill()
         else:
             try:
-                os.killpg(os.getpgid(self._proc.pid), 9)  # SIGKILL
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
-    def _windows_kill(self, force: bool) -> None:
-        """Kill the process tree on Windows via taskkill.
-
-        Windows has no SIGTERM equivalent for arbitrary child processes, so both
-        graceful and forced stops resolve to the same immediate kill here.
-        """
+    def _windows_force_kill(self) -> None:
+        """Hard-kill the process tree on Windows via taskkill, with no graceful step."""
         assert self._proc is not None
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(self._proc.pid)],
@@ -189,39 +259,3 @@ class ManagedProcess:
         """Stop the process (if running) and start it again."""
         await self.stop()
         await self.start()
-
-
-class ProcessManager:
-    """Owns every configured `ManagedProcess` and coordinates startup/shutdown."""
-
-    def __init__(self, configs: list[ProcessConfig]) -> None:
-        self.processes: dict[str, ManagedProcess] = {}
-        self._configs = configs
-
-    def build(
-        self,
-        on_output: OutputCallback | None = None,
-        on_state_change: StateCallback | None = None,
-        on_error: ErrorCallback | None = None,
-    ) -> None:
-        """Create a `ManagedProcess` for each configured entry, wired to the given callbacks."""
-        for config in self._configs:
-            self.processes[config.name] = ManagedProcess(
-                config,
-                on_output=on_output,
-                on_state_change=on_state_change,
-                on_error=on_error,
-            )
-
-    async def autostart(self) -> None:
-        """Start every process configured with `autostart = true`."""
-        for process in self.processes.values():
-            if process.config.autostart:
-                await process.start()
-
-    async def shutdown_all(self) -> None:
-        """Stop every process, so none are left running when devp exits."""
-        await asyncio.gather(
-            *(process.stop() for process in self.processes.values()),
-            return_exceptions=True,
-        )

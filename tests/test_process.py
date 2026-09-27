@@ -1,7 +1,9 @@
+import asyncio
 import sys
 
 import pytest
 
+import devp.process as process_module
 from devp.config import ProcessConfig
 from devp.process import ManagedProcess, ProcessState
 
@@ -64,6 +66,68 @@ async def test_nonzero_exit_marks_crashed():
     assert proc.state == ProcessState.CRASHED
 
 
+async def test_no_autorestart_by_default():
+    config = ProcessConfig(name="failer", command=python_command("import sys; sys.exit(1)"))
+    proc = ManagedProcess(config)
+
+    await proc.start()
+    await proc._wait_task
+
+    assert proc.state == ProcessState.CRASHED
+    assert proc._restart_task is None
+
+    await asyncio.sleep(0.2)
+    assert proc.state == ProcessState.CRASHED
+
+
+async def test_autorestart_respawns_after_crash(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 0.05)
+    monkeypatch.setattr(process_module, "_MAX_RESTART_DELAY", 0.05)
+    config = ProcessConfig(
+        name="failer",
+        command=python_command("import sys; sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+
+    await proc.start()
+    await proc._wait_task
+    assert proc.state == ProcessState.CRASHED
+    first_pid = proc._proc.pid
+    assert proc._crash_count == 1
+
+    for _ in range(100):
+        if proc._crash_count >= 2:
+            break
+        await asyncio.sleep(0.02)
+
+    assert proc._crash_count == 2
+    assert proc._proc.pid != first_pid
+
+
+async def test_stop_cancels_pending_autorestart(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 1.0)
+    config = ProcessConfig(
+        name="failer",
+        command=python_command("import sys; sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+
+    await proc.start()
+    await proc._wait_task
+    assert proc.state == ProcessState.CRASHED
+    assert proc._restart_task is not None
+    first_pid = proc._proc.pid
+
+    await proc.stop()
+    assert proc._restart_task is None
+
+    await asyncio.sleep(1.2)
+    assert proc._proc.pid == first_pid
+    assert proc.state == ProcessState.CRASHED
+
+
 async def test_output_buffer_respects_maxlen():
     config = ProcessConfig(
         name="chatty",
@@ -77,3 +141,54 @@ async def test_output_buffer_respects_maxlen():
 
     assert len(proc.output) == 5
     assert list(proc.output) == [str(i) for i in range(15, 20)]
+
+
+@pytest.mark.skipif(
+    not process_module._has_console(),
+    reason="CTRL_BREAK_EVENT needs a real console attached (none in this host)",
+)
+async def test_windows_graceful_stop_lets_the_process_clean_up():
+    script = (
+        "import signal, sys, time\n"
+        "def handler(signum, frame):\n"
+        "    print('cleanup', flush=True)\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGBREAK, handler)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    config = ProcessConfig(name="graceful", command=python_command(script))
+    proc = ManagedProcess(config)
+
+    await proc.start()
+    for _ in range(100):
+        if "ready" in proc.output:
+            break
+        await asyncio.sleep(0.05)
+    assert "ready" in proc.output
+
+    await proc.stop()
+
+    assert "cleanup" in proc.output
+    assert proc.exit_code == 0
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or process_module._has_console(),
+    reason="only meaningful on Windows without a console attached",
+)
+async def test_windows_without_console_kills_immediately_without_waiting_out_the_timeout():
+    config = ProcessConfig(
+        name="sleeper", command=python_command("import time; time.sleep(30)")
+    )
+    proc = ManagedProcess(config)
+
+    await proc.start()
+
+    loop = asyncio.get_event_loop()
+    started = loop.time()
+    await proc.stop(timeout=5.0)
+    elapsed = loop.time() - started
+
+    assert proc.state == ProcessState.STOPPED
+    assert elapsed < 2.0  # should hard-kill immediately, not wait out the timeout
