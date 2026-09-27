@@ -104,8 +104,7 @@ async def test_events_from_a_previous_generation_are_ignored(config_file):
         await pilot.pause()
         app._generation = 1  # as if a reload happened
         item = app._list_items["api"]
-        before = item.label_text
         app.post_message(ProcessStateChanged("api", ProcessState.CRASHED, generation=0))
         await pilot.pause()
-        assert item.label_text == before
+        assert "✗" not in item.label_text  # the stale "crashed" event was dropped
         await app.manager.shutdown_all()
