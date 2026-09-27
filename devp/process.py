@@ -113,6 +113,10 @@ class ManagedProcess:
         popen_kwargs: dict[str, object] = {
             "cwd": self.config.cwd,
             "env": env,
+            # Never let children inherit the TUI's console stdin: they would steal
+            # keystrokes and, on Windows, flip the shared console into echo/line mode
+            # so typed keys and mouse escape sequences get painted over the UI.
+            "stdin": asyncio.subprocess.DEVNULL,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.STDOUT,
         }
@@ -251,6 +255,7 @@ class ManagedProcess:
         assert self._proc is not None
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(self._proc.pid)],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
         )

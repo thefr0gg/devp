@@ -26,6 +26,17 @@ async def test_start_runs_process_and_captures_output():
     assert "hello" in proc.output
 
 
+async def test_child_does_not_inherit_terminal_stdin():
+    config = ProcessConfig(
+        name="reader", command=python_command("import sys; print(repr(sys.stdin.read()))")
+    )
+    proc = ManagedProcess(config)
+
+    await proc.start()
+    await asyncio.wait_for(proc._wait_task, timeout=5)
+    assert "''" in proc.output
+
+
 async def test_stop_terminates_running_process():
     config = ProcessConfig(
         name="sleeper", command=python_command("import time; time.sleep(30)")

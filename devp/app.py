@@ -50,21 +50,57 @@ class DevpApp(App[None]):
     Footer {
         background: transparent;
     }
+    #sidebar, #log-pane {
+        background: transparent;
+        border: round $panel;
+        border-title-color: $text-muted;
+    }
     #sidebar {
         width: 32;
-        background: transparent;
-        border-right: solid $panel;
+    }
+    #log-pane {
+        width: 1fr;
+    }
+    /* Highlight whichever pane has keyboard focus. */
+    #sidebar:focus, #log-pane:focus-within {
+        border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
     }
     ListView, ListItem {
         background: transparent;
     }
-    #log-pane {
-        width: 1fr;
-        background: transparent;
+    ListView > ListItem.-highlight {
+        background: $panel;
+    }
+    ListView:focus > ListItem.-highlight {
+        background: $accent 40%;
+        text-style: bold;
     }
     #log {
         height: 1fr;
         background: transparent;
+    }
+    /* Notifications: compact rounded cards matching the panes, tinted by severity. */
+    ToastRack {
+        margin: 0 2 1 0;
+    }
+    Toast {
+        width: 44;
+        max-width: 60%;
+        margin-top: 0;
+        padding: 0 1;
+        background: $surface;
+        border: round $panel;
+    }
+    Toast.-information {
+        border: round $success;
+    }
+    Toast.-warning {
+        border: round $warning;
+    }
+    Toast.-error {
+        border: round $error;
     }
     #search-input {
         height: 3;
@@ -120,7 +156,9 @@ class DevpApp(App[None]):
     async def on_mount(self) -> None:
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
         self.query_one("#search-input", Input).display = False
-        self.query_one("#sidebar", ListView).focus()
+        sidebar = self.query_one("#sidebar", ListView)
+        sidebar.border_title = "Processes"
+        sidebar.focus()
         self._refresh_log_pane()
         self.set_interval(_CRON_TICK_INTERVAL, self._tick_cron_labels)
         await self.manager.autostart()
@@ -184,6 +222,9 @@ class DevpApp(App[None]):
 
     def _refresh_log_pane(self) -> None:
         """Clear the log pane and replay the selected process's buffered output into it."""
+        self.query_one("#log-pane").border_title = (
+            f"Logs · {escape(self.selected_name)}" if self.selected_name else "Logs"
+        )
         log = self.query_one("#log", RichLog)
         log.clear()
         self._log_row_count = 0

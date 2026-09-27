@@ -106,3 +106,19 @@ async def test_escape_is_a_noop_when_search_is_not_open():
         assert log.has_focus is True  # escape must not steal focus when search is closed
 
         await app.manager.shutdown_all()
+
+
+async def test_focused_pane_border_is_highlighted():
+    app = make_app()
+    async with app.run_test() as pilot:
+        sidebar = app.query_one("#sidebar")
+        log_pane = app.query_one("#log-pane")
+        await pilot.pause()
+        assert sidebar.styles.border_top[1] != log_pane.styles.border_top[1]
+        sidebar_focused_color = sidebar.styles.border_top[1]
+
+        app.query_one("#log").focus()
+        await pilot.pause()
+        assert log_pane.styles.border_top[1] == sidebar_focused_color
+        assert sidebar.styles.border_top[1] != sidebar_focused_color
+        assert log_pane.border_title == "Logs · sleeper"
