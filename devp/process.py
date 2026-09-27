@@ -82,6 +82,7 @@ class ManagedProcess:
         self._crash_count = 0
         self._started_at = 0.0
         self._ready: asyncio.Future[bool] | None = None
+        self._start_lock = asyncio.Lock()
         self._ready_task: asyncio.Task[None] | None = None
         self._ready_pattern = re.compile(config.ready_when) if config.ready_when else None
 
@@ -115,6 +116,12 @@ class ManagedProcess:
         A failure to spawn (e.g. missing executable) is reported as a CRASHED state
         rather than raised, so callers don't need to guard every call site.
         """
+        # The state only changes once the spawn completes, so without the lock two
+        # overlapping calls (e.g. autostart and "start all") could both spawn.
+        async with self._start_lock:
+            await self._start()
+
+    async def _start(self) -> None:
         if self.state in (ProcessState.RUNNING, ProcessState.STARTING):
             return
 

@@ -186,6 +186,9 @@ class DevpApp(App[None]):
         ("s", "start_selected", "Run"),
         ("x", "stop_selected", "Stop"),
         ("r", "restart_selected", "Restart"),
+        ("S", "start_all", "Run all"),
+        ("X", "stop_all", "Stop all"),
+        ("c", "clear_log", "Clear log"),
         ("slash", "search", "Search"),
         ("n", "next_match", "Next match"),
         ("N", "prev_match", "Prev match"),
@@ -502,6 +505,26 @@ class DevpApp(App[None]):
         process = self._selected_process()
         if process is not None:
             await process.restart()
+
+    def action_start_all(self) -> None:
+        """Start every process and cron schedule, in dependency order (bound to 'S')."""
+        self.notify("Starting everything", severity="information", timeout=2)
+        self.run_worker(self.manager.start_all(), group="bulk", exclusive=True)
+
+    def action_stop_all(self) -> None:
+        """Stop every process and cron schedule, dependents first (bound to 'X')."""
+        if self._autostart is not None:
+            self._autostart.cancel()
+        self.notify("Stopping everything", severity="information", timeout=2)
+        # Same exclusive group as start_all: stopping cancels a start-all in progress.
+        self.run_worker(self.manager.stop_all(), group="bulk", exclusive=True)
+
+    def action_clear_log(self) -> None:
+        """Clear the selected process's log (bound to 'c')."""
+        process = self._selected_process()
+        if process is not None:
+            process.output.clear()
+            self._refresh_log_pane()
 
     def _selected_process(self):
         """Return the `ManagedProcess` for the sidebar selection, if any."""

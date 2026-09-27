@@ -353,3 +353,64 @@ async def test_base_background_is_the_terminal_default():
         painted = [bg for bg in cells if bg is not None and not bg.is_default]
         assert len(painted) <= 30  # just the (unfocused) selected sidebar row
         await app.manager.shutdown_all()
+
+
+def two_process_app() -> DevpApp:
+    config = Config(
+        processes=[
+            ProcessConfig(name="db", command=python_command("import time; time.sleep(30)")),
+            ProcessConfig(
+                name="api",
+                command=python_command("import time; time.sleep(30)"),
+                depends_on=["db"],
+                autostart=False,
+            ),
+        ],
+        crons=[],
+    )
+    return DevpApp(ProcessManager(config))
+
+
+async def _wait_for(predicate, timeout=5.0):
+    for _ in range(int(timeout / 0.05)):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met in time")
+
+
+async def test_start_all_and_stop_all():
+    app = two_process_app()
+    async with app.run_test() as pilot:
+        db, api = app.manager.processes["db"], app.manager.processes["api"]
+        await _wait_for(lambda: db.state == ProcessState.RUNNING)
+        assert api.state == ProcessState.STOPPED  # autostart = false
+
+        await pilot.press("S")
+        await _wait_for(lambda: api.state == ProcessState.RUNNING)
+
+        await pilot.press("X")
+        await _wait_for(
+            lambda: db.state == ProcessState.STOPPED and api.state == ProcessState.STOPPED
+        )
+        await app.manager.shutdown_all()
+
+
+async def test_clear_log_empties_the_selected_process_buffer():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        sleeper.log("old line")
+        await asyncio.sleep(0.1)
+        log = app.query_one("#log")
+        assert log.line_count == 1
+
+        await pilot.press("c")
+        await pilot.pause()
+        assert log.line_count == 0 and len(sleeper.output) == 0
+
+        sleeper.log("new line")  # later output still streams in
+        await asyncio.sleep(0.1)
+        assert log.find("new line")
+        await app.manager.shutdown_all()

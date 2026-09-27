@@ -64,6 +64,13 @@ class ProcessManager:
         event rather than compute an explicit topological order.
         """
         self.start_watchers()
+        await self._start_in_dependency_order(include_manual=False)
+
+    async def start_all(self) -> None:
+        """Start every process (autostart or not) and cron schedule, in dependency order."""
+        await self._start_in_dependency_order(include_manual=True)
+
+    async def _start_in_dependency_order(self, *, include_manual: bool) -> None:
         settled = {name: asyncio.Event() for name in self.processes}
         ready: dict[str, bool] = {}
 
@@ -79,7 +86,7 @@ class ProcessManager:
                 elif isinstance(runnable, CronJob):
                     await runnable.start_schedule()
                     ready[name] = True
-                elif runnable.config.autostart:
+                elif runnable.config.autostart or include_manual:
                     await runnable.start()
                     ready[name] = await runnable.wait_ready()
             finally:
@@ -118,10 +125,14 @@ class ProcessManager:
             self._on_error(runnable.config.name, reason)
 
     async def shutdown_all(self) -> None:
-        """Stop every process/run and cron schedule, stopping dependents before their dependencies."""
+        """Stop file watching, then every process/run and cron schedule (see `stop_all`)."""
         for watcher in self._watchers:
             await watcher.stop()
         self._watchers.clear()
+        await self.stop_all()
+
+    async def stop_all(self) -> None:
+        """Stop every process/run and cron schedule, stopping dependents before their dependencies."""
         for runnable in self.processes.values():
             if isinstance(runnable, CronJob):
                 await runnable.stop_schedule()

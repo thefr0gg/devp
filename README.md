@@ -219,6 +219,8 @@ skipped — runs never overlap.
 | `s`            | Run the selected process/cron job now                          |
 | `x`            | Stop the selected process/cron job's current run                |
 | `r`            | Restart the selected process/cron job (stop, then run again)    |
+| `S` / `X`      | Start / stop everything (in `depends_on` order; pauses and resumes cron schedules) |
+| `c`            | Clear the selected process's log                               |
 | `/`            | Search the selected process's log                              |
 | `n` / `N`      | Jump to the next / previous search match                       |
 | `Esc`          | Close the search bar and clear highlighting                    |

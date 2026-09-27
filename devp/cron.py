@@ -26,6 +26,7 @@ class CronJob:
     ) -> None:
         self.config = config
         self.enabled = config.enabled
+        self._paused = False  # schedule stopped by the user (stop all), until started again
         self.next_run_at: datetime | None = None
         self._on_state_change = on_state_change
         self._process = ManagedProcess(
@@ -56,11 +57,12 @@ class CronJob:
 
     @property
     def state(self) -> ProcessState:
-        """STARTING/RUNNING/CRASHED pass through; otherwise SCHEDULED if enabled, else STOPPED."""
+        """STARTING/RUNNING/CRASHED pass through; otherwise SCHEDULED if enabled (and not
+        paused), else STOPPED."""
         inner = self._process.state
         if inner in (ProcessState.STARTING, ProcessState.RUNNING, ProcessState.CRASHED):
             return inner
-        return ProcessState.SCHEDULED if self.enabled else ProcessState.STOPPED
+        return ProcessState.SCHEDULED if self.enabled and not self._paused else ProcessState.STOPPED
 
     def log(self, line: str) -> None:
         """Append a line to this job's output buffer."""
@@ -83,6 +85,7 @@ class CronJob:
         """Begin the recurring schedule loop, if enabled and not already running."""
         if not self.enabled or self._scheduler_task is not None:
             return
+        self._paused = False
         self._scheduler_task = asyncio.create_task(self._run_loop())
 
     async def stop_schedule(self) -> None:
@@ -90,6 +93,9 @@ class CronJob:
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             self._scheduler_task = None
+            self.next_run_at = None
+            self._paused = True
+            self._notify_state_change()
 
     async def _run_loop(self) -> None:
         """Sleep until each scheduled time, run the command, and wait for it before rescheduling.
