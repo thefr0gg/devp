@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+from functools import partial
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.events import Resize
+from textual.events import Click, Resize
+from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
 
+from devp.clipboard import copy_native
 from devp.cron import CronJob
 from devp.log_view import LogView
 from devp.manager import ProcessManager
@@ -45,6 +49,13 @@ def _status_detail(runnable: object) -> str | None:
 class ProcessListItem(ListItem):
     """A sidebar row that remembers which process it represents."""
 
+    class DoubleClicked(Message):
+        """The row was double-clicked (the first click already selected it)."""
+
+        def __init__(self, process_name: str) -> None:
+            super().__init__()
+            self.process_name = process_name
+
     def __init__(self, process_name: str, state: ProcessState, detail: str | None = None) -> None:
         self.label_text = status_label(process_name, state, detail)
         self.label = Label(self.label_text)
@@ -57,6 +68,10 @@ class ProcessListItem(ListItem):
         if text != self.label_text:
             self.label_text = text
             self.label.update(text)
+
+    def on_click(self, event: Click) -> None:
+        if event.chain == 2:
+            self.post_message(self.DoubleClicked(self.process_name))
 
 
 class DevpApp(App[None]):
@@ -113,14 +128,11 @@ class DevpApp(App[None]):
        then relative to the pane, so toasts shrink with small windows, and
        `DevpApp._trim_toasts` drops the oldest ones that don't fit vertically. */
     ToastRack {
-        margin-bottom: 2;
+        margin-bottom: 2;  /* raised while the search bar is open: _set_search_open */
         /* Horizontal offsets must be padding: the docked rack ignores side margins.
            Right: 1 col of padding + the rack's own 2-col (invisible) scrollbar gutter
            clears the log's scrollbar and the pane border. */
         padding: 0 1 0 33;
-    }
-    DevpApp.-searching ToastRack {
-        margin-bottom: 5;  /* stay above the search bar while it's open */
     }
     Toast {
         width: 44;
@@ -157,7 +169,8 @@ class DevpApp(App[None]):
         ("N", "prev_match", "Prev match"),
         ("escape", "close_search", "Close search"),
         ("q", "quit", "Quit"),
-        ("ctrl+c", "quit", "Quit"),
+        # Priority, so it wins over the screen's own silent copy binding.
+        Binding("ctrl+c", "copy_or_quit", "Copy / Quit", show=False, priority=True),
     ]
 
     def __init__(self, manager: ProcessManager) -> None:
@@ -324,8 +337,17 @@ class DevpApp(App[None]):
         self._pre_search_focus = self.focused
         search_input = self.query_one("#search-input", Input)
         search_input.display = True
-        self.add_class("-searching")
+        self._set_search_open(True)
         search_input.focus()
+
+    def _set_search_open(self, is_open: bool) -> None:
+        """Lift the toast stack above the search bar while it's open.
+
+        Set inline on the rack rather than via a class on the app, which would make
+        Textual restyle every widget and noticeably slow opening/closing search.
+        """
+        for rack in self.screen.query("ToastRack"):
+            rack.styles.margin = (0, 0, 5 if is_open else 2, 0)
 
     def _close_search_input(self, *, focus_log: bool = False) -> None:
         """Hide the search bar, clear its text, and restore keyboard focus somewhere sane.
@@ -338,7 +360,7 @@ class DevpApp(App[None]):
         """
         search_input = self.query_one("#search-input", Input)
         search_input.display = False
-        self.remove_class("-searching")
+        self._set_search_open(False)
         search_input.value = ""
         target = self._pre_search_focus
         self._pre_search_focus = None
@@ -432,6 +454,27 @@ class DevpApp(App[None]):
         if self.selected_name is None:
             return None
         return self.manager.processes.get(self.selected_name)
+
+    async def on_process_list_item_double_clicked(
+        self, message: ProcessListItem.DoubleClicked
+    ) -> None:
+        """Start (or, for a cron job, run now) the double-clicked process."""
+        process = self.manager.processes.get(message.process_name)
+        if process is not None:
+            await process.start()
+
+    async def action_copy_or_quit(self) -> None:
+        """Copy the selected log text (bound to Ctrl+C); with nothing selected, quit."""
+        text = self.screen.get_selected_text()
+        if not text:
+            await self.action_quit()
+            return
+        self.copy_to_clipboard(text)  # OSC 52, for terminals that support it
+        self.run_worker(partial(copy_native, text), thread=True, exit_on_error=False)
+        self.screen.clear_selection()
+        lines = text.count("\n") + 1
+        summary = f"{lines} lines" if lines > 1 else f"{len(text)} characters"
+        self.notify(f"Copied {summary}", severity="information", timeout=2)
 
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""

@@ -69,3 +69,54 @@ async def test_scroll_to_line_accounts_for_wrapped_rows():
         log.scroll_to_line(log.find("line 5")[0])
         await pilot.pause()
         assert log.scroll_y == 3 + 5
+
+
+async def test_screen_offsets_map_wrapped_rows_back_to_the_original_line():
+    app = LogApp()
+    async with app.run_test(size=(22, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        width = log.scrollable_content_region.width
+        long_line = "".join(chr(ord("a") + i % 26) for i in range(width * 2))
+        log.write_lines(["first", long_line])
+        await pilot.pause()
+        origin = log.content_region.offset
+
+        # Row 0 is "first" (line 0); rows 1-2 are the two halves of line 1.
+        widget, offset = app.screen.get_widget_and_offset_at(origin.x + 2, origin.y)
+        assert widget is log and tuple(offset) == (2, 0)
+        widget, offset = app.screen.get_widget_and_offset_at(origin.x + 3, origin.y + 2)
+        assert tuple(offset) == (width + 3, 1)
+
+
+async def test_selection_extracts_text_across_lines_and_survives_pruning():
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    app = LogApp(max_lines=4)
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        log.write_lines(["alpha", "bravo", "charlie"])
+        selection = Selection(Offset(2, 0), Offset(3, 2))
+        assert log.get_selection(selection) == ("pha\nbravo\ncha", "\n")
+
+        # Offsets are absolute line indices: pruning 'alpha' keeps the rest selected.
+        log.write_lines(["delta", "echo"])
+        assert log.get_selection(selection) == ("bravo\ncha", "\n")
+
+
+async def test_selected_text_keeps_its_own_color():
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    app = LogApp()
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        log.write_lines(["hello world"])
+        app.screen.selections = {log: Selection(Offset(0, 0), Offset(5, 0))}
+        await pilot.pause()
+        selected = next(seg for seg in log.render_line(0) if seg.text.startswith("hello"))
+        assert selected.style.bgcolor is not None
+        assert selected.style.color != selected.style.bgcolor  # text stays readable

@@ -152,7 +152,11 @@ skipped — runs never overlap.
 | `/`            | Search the selected process's log                              |
 | `n` / `N`      | Jump to the next / previous search match                       |
 | `Esc`          | Close the search bar and clear highlighting                    |
-| `q` / `Ctrl+C` | Quit devp (stops every running process and cron schedule first) |
+| `Ctrl+C`       | Copy the selected log text; with nothing selected, quit        |
+| `q`            | Quit devp (stops every running process and cron schedule first) |
+
+With the mouse, click a process to select it, and **double-click** it to run it
+(the same as pressing `s`).
 
 Each item in the sidebar shows a status glyph. They're plain braille/text
 characters (not emoji), so they line up in any terminal font; active states animate:
@@ -178,11 +182,24 @@ match. Press `n` / `N` to cycle to the next / previous match, and `Esc` to close
 search bar and clear the highlighting. Searching (and scrolling) always applies to
 the currently selected process's log.
 
+### Selecting and copying log text
+
+Drag with the mouse across the log pane to select text; the selection can span
+several lines, and a long line that's wrapped on screen is copied as the single
+line the process printed. Press `Ctrl+C` to copy it; a toast confirms how much was
+copied.
+
+devp copies through your terminal (OSC 52, supported by most modern terminals) and,
+where one is installed, your system's clipboard tool (`pbcopy`, `clip`, `wl-copy`,
+`xclip`, or `xsel`), so copying works even in terminals without OSC 52.
+
+### Process output
+
 Selecting a process shows its full scrollback in the log pane on the right, and new
 output keeps streaming in live. If a process crashes or fails to start, you'll see
 an error toast explaining why, in addition to the sidebar turning red.
 
-When you quit devp — with `q` or `Ctrl+C` — every process it started is stopped
+When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
 first, so nothing keeps running in the background after you close the terminal.
 
 ## Development
@@ -200,6 +217,8 @@ The codebase is small and split by responsibility:
 - `devp/cron.py` — runs a process on a recurring schedule, reusing `devp/process.py`
 - `devp/manager.py` — builds and coordinates every configured process and cron job
 - `devp/app.py` — the Textual TUI (sidebar, log pane, keybindings)
+- `devp/log_view.py` — the log pane: wraps and renders only visible rows, handles selection
+- `devp/clipboard.py` — copies to the system clipboard with the platform's native tool
 - `devp/messages.py` / `devp/widgets.py` — small supporting pieces for the TUI
 - `devp/__main__.py` — the `devp` command's entry point
 
