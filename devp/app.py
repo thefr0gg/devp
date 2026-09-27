@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from functools import partial
 
 from rich.markup import escape
@@ -18,12 +19,13 @@ from textual.widgets import Footer, Input, Label, ListItem, ListView
 from textual.worker import Worker
 
 from devp.clipboard import copy_native
+from devp.config import Config, ConfigError, load_config
 from devp.cron import CronJob
 from devp.log_view import LogView
 from devp.manager import ProcessManager
 from devp.messages import ProcessError, ProcessStateChanged
 from devp.process import MAX_BUFFER_LINES, ProcessState
-from devp.screens import HelpScreen
+from devp.screens import HelpScreen, ReloadConfigScreen
 from devp.widgets import format_duration, is_animated, status_label
 
 # How often animated sidebar glyphs advance a frame (also ticks cron countdowns).
@@ -35,6 +37,18 @@ _LOG_FLUSH_INTERVAL = 1 / 30
 # with the search bar open), and the tallest a typical toast gets (border, title, text).
 _TOAST_RESERVED_ROWS = 6
 _TOAST_ROWS = 4
+_CONFIG_POLL_INTERVAL = 1.0
+
+
+def _file_stamp(path: Path | None) -> tuple[int, int] | None:
+    """A cheap fingerprint of a file (mtime, size) to notice it being saved."""
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _status_detail(runnable: object) -> str | None:
@@ -221,7 +235,7 @@ class DevpApp(App[None]):
         Binding("ctrl+c", "copy_or_quit", "Copy / Quit", show=False, priority=True),
     ]
 
-    def __init__(self, manager: ProcessManager) -> None:
+    def __init__(self, manager: ProcessManager, config_path: Path | None = None) -> None:
         # ansi_color: draw the base background and text in the terminal's *default*
         # colors instead of painting the theme's. Terminals pad the character grid with
         # a margin no app can draw in, filled with that default background, so painting
@@ -231,12 +245,14 @@ class DevpApp(App[None]):
         # the terminal allows it.
         super().__init__(ansi_color=True)
         self.theme = "rose-pine"
+        # Bumped on every config reload; events from an older manager's processes carry
+        # an older generation and are ignored.
+        self._generation = 0
         self.manager = manager
-        self.manager.build(
-            on_output=self._on_output,
-            on_state_change=self._on_state_change,
-            on_error=self._on_error,
-        )
+        self._wire(manager)
+        self._config_path = config_path
+        self._config_stamp = _file_stamp(config_path)
+        self._reloading = False
         self._process_names = list(manager.processes.keys())
         self.selected_name: str | None = self._process_names[0] if self._process_names else None
         self._list_items: dict[str, ProcessListItem] = {}
@@ -253,17 +269,30 @@ class DevpApp(App[None]):
     def compose(self) -> ComposeResult:
         """Lay out the sidebar (process list) and the log pane side by side."""
         with Horizontal():
-            items = []
-            for name in self._process_names:
-                runnable = self.manager.processes[name]
-                item = ProcessListItem(name, runnable.state, detail=_status_detail(runnable))
-                self._list_items[name] = item
-                items.append(item)
-            yield ListView(*items, id="sidebar")
+            yield ListView(*self._make_list_items(), id="sidebar")
             with self._log_pane:
                 yield self._log_view
                 yield Input(placeholder="› search logs", id="search-input")
         yield Footer()
+
+    def _make_list_items(self) -> list[ProcessListItem]:
+        self._list_items = {}
+        for name in self._process_names:
+            runnable = self.manager.processes[name]
+            item = ProcessListItem(name, runnable.state, detail=_status_detail(runnable))
+            self._list_items[name] = item
+        return list(self._list_items.values())
+
+    def _wire(self, manager: ProcessManager) -> None:
+        """Build `manager`'s processes with callbacks tagged with the current generation."""
+        generation = self._generation
+        manager.build(
+            on_output=lambda name, line: self._on_output(name, line, generation),
+            on_state_change=lambda name, state: self.post_message(
+                ProcessStateChanged(name, state, generation)
+            ),
+            on_error=lambda name, text: self.post_message(ProcessError(name, text, generation)),
+        )
 
     def _on_notify(self, event: Notify) -> None:
         super()._on_notify(event)
@@ -296,6 +325,8 @@ class DevpApp(App[None]):
         sidebar.focus()
         self._refresh_log_pane()
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
+        if self._config_path is not None:
+            self.set_interval(_CONFIG_POLL_INTERVAL, self._check_config)
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
 
@@ -346,13 +377,13 @@ class DevpApp(App[None]):
                 item.set_status(state, _status_detail(runnable), self._glyph_frame)
         self._update_log_title()  # uptime ticks; pid/exit code change with the state
 
-    def _on_output(self, process_name: str, line: str) -> None:
+    def _on_output(self, process_name: str, line: str, generation: int) -> None:
         """Queue a line of the selected process's output for the next batched log write.
 
         Other processes' output needs no UI work: it's already in their scrollback
         buffer and gets replayed when they're selected.
         """
-        if process_name != self.selected_name:
+        if process_name != self.selected_name or generation != self._generation:
             return
         self._pending_lines.append(line)
         if self._flush_timer is None:
@@ -372,16 +403,10 @@ class DevpApp(App[None]):
             self._flush_timer = None
         self._pending_lines = []
 
-    def _on_state_change(self, process_name: str, state: ProcessState) -> None:
-        """Forward a process's state change into the app's message queue."""
-        self.post_message(ProcessStateChanged(process_name, state))
-
-    def _on_error(self, process_name: str, text: str) -> None:
-        """Forward a process error into the app's message queue."""
-        self.post_message(ProcessError(process_name, text))
-
     def on_process_state_changed(self, message: ProcessStateChanged) -> None:
         """Refresh the sidebar glyph and show a brief toast for the new state."""
+        if message.generation != self._generation:
+            return
         item = self._list_items.get(message.process_name)
         if item is not None:
             runnable = self.manager.processes.get(message.process_name)
@@ -399,6 +424,8 @@ class DevpApp(App[None]):
 
     def on_process_error(self, message: ProcessError) -> None:
         """Show a process failure (bad command, crash) as an error toast."""
+        if message.generation != self._generation:
+            return
         self.notify(
             escape(message.text),
             title=escape(message.process_name),
@@ -598,6 +625,69 @@ class DevpApp(App[None]):
         lines = text.count("\n") + 1
         summary = f"{lines} lines" if lines > 1 else f"{len(text)} characters"
         self.notify(f"Copied {summary}", severity="information", timeout=2)
+
+    def _check_config(self) -> None:
+        """Offer to reload devp.toml when it's been saved with a meaningful change."""
+        if self._reloading or self._config_path is None:
+            return
+        stamp = _file_stamp(self._config_path)
+        if stamp is None or stamp == self._config_stamp:
+            return
+        self._config_stamp = stamp  # asked (or rejected) once per save
+        name = self._config_path.name
+        try:
+            config = load_config(self._config_path)
+        except ConfigError as exc:
+            self.notify(
+                f"{escape(str(exc))}\nStill running the previous config.",
+                title=f"{name} has an error",
+                severity="error",
+                timeout=10,
+            )
+            return
+        if config == self.manager.config:
+            return  # e.g. only comments or whitespace changed
+        running = [
+            process_name
+            for process_name, runnable in self.manager.processes.items()
+            if runnable.state in (ProcessState.STARTING, ProcessState.RUNNING)
+        ]
+
+        def on_answer(reload: bool | None) -> None:
+            if reload:
+                self.run_worker(self._reload(config), group="reload", exclusive=True)
+
+        self.push_screen(ReloadConfigScreen(name, running), on_answer)
+
+    async def _reload(self, config: Config) -> None:
+        """Stop everything, then rebuild the process list from `config` and autostart it."""
+        self._reloading = True
+        try:
+            self.notify("Reloading config: stopping everything", timeout=3)
+            if self._autostart is not None:
+                self._autostart.cancel()
+            self.workers.cancel_group(self, "bulk")
+            await self.manager.shutdown_all()
+
+            self._generation += 1
+            self.manager = ProcessManager(config)
+            self._wire(self.manager)
+            self._process_names = list(self.manager.processes)
+            if self.selected_name not in self.manager.processes:
+                self.selected_name = self._process_names[0] if self._process_names else None
+
+            sidebar = self.query_one("#sidebar", ListView)
+            await sidebar.clear()
+            await sidebar.extend(self._make_list_items())
+            if self.selected_name is not None:
+                sidebar.index = self._process_names.index(self.selected_name)
+            self._search_query = ""
+            self._refresh_log_pane()
+
+            self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+            self.notify("Config reloaded", severity="information", timeout=3)
+        finally:
+            self._reloading = False
 
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""

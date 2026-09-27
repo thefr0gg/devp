@@ -88,13 +88,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # Run from the config's directory, so relative `cwd` and `watch` paths always mean
     # the same thing no matter where devp was launched from.
-    os.chdir(config_path.resolve().parent)
+    config_path = config_path.resolve()
+    os.chdir(config_path.parent)
 
     # Deferred: loading Textual is the bulk of startup, and `init`/errors don't need it.
     from devp.app import DevpApp
     from devp.manager import ProcessManager
 
-    DevpApp(ProcessManager(config)).run()
+    DevpApp(ProcessManager(config), config_path=config_path).run()
 
 
 def _init(*, force: bool) -> None:

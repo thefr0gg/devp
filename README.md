@@ -183,6 +183,15 @@ devp checks for changes about once a second, logs which file changed
 restarts a process that's running, starting, or crashed; if you stopped it with `x`,
 it stays stopped until you start it again.
 
+### Reloading the config
+
+devp notices when you save `devp.toml` while it's running and asks whether to
+reload it. Choosing **Stop & reload** (`y`) stops everything, rebuilds the process
+list from the new file, and starts it up again; **Keep current** (`n`) leaves things
+as they are, and devp won't ask again until the next save. If the new file has a
+mistake, devp shows the error and keeps running the previous config; a save that
+changes nothing that matters (only comments, say) doesn't prompt at all.
+
 ### Cron jobs
 
 A `[[cron]]` entry runs a command on a recurring schedule instead of continuously,

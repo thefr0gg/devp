@@ -58,7 +58,7 @@ class ReloadConfigScreen(ModalScreen[bool]):
     def __init__(self, config_name: str, running: list[str]) -> None:
         super().__init__()
         self._config_name = config_name
-        self._running = running
+        self._running_names = running
 
     def compose(self) -> ComposeResult:
         with Vertical(id="reload-dialog") as dialog:
@@ -66,10 +66,10 @@ class ReloadConfigScreen(ModalScreen[bool]):
             yield Label(
                 f"[b]{escape(self._config_name)}[/b] was modified. Reload it now?"
             )
-            if self._running:
-                names = ", ".join(escape(name) for name in self._running)
+            if self._running_names:
+                names = ", ".join(escape(name) for name in self._running_names)
                 yield Label(
-                    f"This will stop {len(self._running)} running process(es): {names}",
+                    f"This will stop {len(self._running_names)} running process(es): {names}",
                     id="reload-running",
                 )
             else:

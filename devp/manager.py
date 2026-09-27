@@ -22,6 +22,7 @@ class ProcessManager:
     """Owns every configured `ManagedProcess` and `CronJob`, keyed by name."""
 
     def __init__(self, config: Config) -> None:
+        self.config = config
         self.processes: dict[str, Runnable] = {}
         self._process_configs = config.processes
         self._cron_configs = config.crons
