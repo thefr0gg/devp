@@ -16,7 +16,7 @@ from textual.events import Click, Resize
 from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
-from textual.widgets import Footer, Input, Label, ListItem, ListView
+from textual.widgets import Footer, Input, Label, ListItem, ListView, Static
 from textual.app import ScreenStackError
 from textual.screen import ModalScreen
 from textual.worker import Worker
@@ -26,6 +26,7 @@ from devp.config import Config, ConfigError, load_config
 from devp.cron import CronJob
 from devp.log_view import LogView
 from devp.manager import ProcessManager
+from devp.mascot import MASCOT_HEIGHT, MASCOT_WIDTH, render_mascot
 from devp.messages import ProcessError, ProcessStateChanged
 from devp.process import MAX_BUFFER_LINES, ProcessState
 from devp.screens import HelpScreen, ReloadConfigScreen
@@ -138,19 +139,26 @@ class DevpApp(App[None]):
     Footer {
         background: transparent;
     }
-    #sidebar, #log-pane {
+    #sidebar-pane, #log-pane {
         background: transparent;
         border: round $panel;
         border-title-color: $text-muted;
     }
-    #sidebar {
+    #sidebar-pane {
         width: 32;
+    }
+    #sidebar {
+        height: 1fr;
+    }
+    #mascot {
+        width: auto;
+        height: auto;
     }
     #log-pane {
         width: 1fr;
     }
     /* Highlight whichever pane has keyboard focus. */
-    #sidebar:focus, #log-pane:focus-within {
+    #sidebar-pane:focus-within, #log-pane:focus-within {
         border: round $accent;
         border-title-color: $accent;
         border-title-style: bold;
@@ -296,11 +304,15 @@ class DevpApp(App[None]):
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
         self._log_pane = Vertical(id="log-pane")
+        self._mascot = Static(render_mascot(), id="mascot")
 
     def compose(self) -> ComposeResult:
         """Lay out the sidebar (process list) and the log pane side by side."""
         with Horizontal():
-            yield ListView(*self._make_list_items(), id="sidebar")
+            with Vertical(id="sidebar-pane") as sidebar_pane:
+                sidebar_pane.border_title = "Processes"
+                yield ListView(*self._make_list_items(), id="sidebar")
+                yield self._mascot
             with self._log_pane:
                 yield self._log_view
                 yield SearchInput(placeholder="› search logs", id="search-input")
@@ -396,9 +408,7 @@ class DevpApp(App[None]):
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
         self._use_theme_as_terminal_colors()
         self.query_one("#search-input", Input).display = False
-        sidebar = self.query_one("#sidebar", ListView)
-        sidebar.border_title = "Processes"
-        sidebar.focus()
+        self.query_one("#sidebar", ListView).focus()
         self._refresh_log_pane()
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
         if self._config_path is not None:
@@ -424,6 +434,16 @@ class DevpApp(App[None]):
         # terminal's own default colors (OSC 111 / OSC 110).
         if self._driver is not None:
             self._driver.write("\x1b]111\x07\x1b]110\x07")
+
+    def _update_mascot(self) -> None:
+        """Show the mascot below the process list only while there's room for both."""
+        pane = self._mascot.parent
+        if not self._mascot.is_attached or pane is None:
+            return
+        room = pane.content_size.height - len(self._list_items) - 1  # 1: breathing space
+        fits = room >= MASCOT_HEIGHT and pane.content_size.width >= MASCOT_WIDTH
+        if self._mascot.display != fits:
+            self._mascot.display = fits
 
     def _update_log_title(self) -> None:
         if not self._log_pane.is_attached:  # the sidebar timer can fire during shutdown
@@ -453,6 +473,7 @@ class DevpApp(App[None]):
             if is_animated(state) or isinstance(runnable, CronJob):
                 item.set_status(state, _status_detail(runnable), self._glyph_frame)
         self._update_log_title()  # uptime ticks; pid/exit code change with the state
+        self._update_mascot()
 
     def _on_output(self, process_name: str, line: str, generation: int) -> None:
         """Queue a line of the selected process's output for the next batched log write.

@@ -36,19 +36,23 @@ def test_active_states_animate_and_idle_states_do_not():
 
 
 def test_status_label_cycles_frames():
-    frames = {status_label("api", ProcessState.RUNNING, frame=i) for i in range(10)}
-    assert len(frames) == 10
-    assert status_label("api", ProcessState.RUNNING, frame=0) == status_label(
-        "api", ProcessState.RUNNING, frame=10
-    )
+    running = [status_label("api", ProcessState.RUNNING, frame=i) for i in range(16)]
+    assert all(running[i] != running[i + 1] for i in range(15))  # it visibly moves
+    assert running[:8] == running[8:]  # and loops
+    assert len(set(running)) > 3
     assert status_label("api", ProcessState.CRASHED, frame=0) == status_label(
         "api", ProcessState.CRASHED, frame=3
     )
 
 
-def test_glyphs_are_not_emoji():
-    # Braille patterns and ✗ have no emoji presentation, so they stay one cell wide.
+def test_glyphs_are_single_width_text_not_emoji():
+    import unicodedata
+
+    # Not emoji, and not East Asian "ambiguous" width (drawn 2 columns wide by some
+    # CJK-locale terminals): every glyph must be exactly one column everywhere.
+    emoji_capable = set("✨✳✴❇●✕★☆")
     for state in ProcessState:
-        for frame in range(10):
+        for frame in range(20):
             glyph = status_label("x", state, frame=frame).split("]")[1][0]
-            assert glyph == "✗" or 0x2800 <= ord(glyph) <= 0x28FF
+            assert glyph not in emoji_capable
+            assert unicodedata.east_asian_width(glyph) == "N", (state, glyph)

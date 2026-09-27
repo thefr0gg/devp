@@ -306,16 +306,19 @@ With the mouse, click a process to select it, and **double-click** it to run it
 (the same as pressing `s`).
 
 devp uses the [Rosé Pine](https://rosepinetheme.com/) color theme. Each item in the
-sidebar shows a status glyph. They're plain braille/text characters (not emoji), so
-they line up in any terminal font; active states animate:
+sidebar shows a status glyph: the sparks from the mascot's magic wand. They're plain
+text symbols (not emoji), so they line up in any terminal font; active states animate:
 
-- `⠋` rose spinner — starting (waiting for its `ready_when` / `ready_port` check)
-- `⠋` foam spinner — running
-- `⠶` muted — stopped
-- `⠋` gold spinner — stopping
+- `✦` rose, gathering — starting (waiting for its `ready_when` / `ready_port` check)
+- `✶` foam, twinkling — running
+- `✸` gold, fading — stopping
+- `✧` muted — stopped
 - `✗` love (red) — crashed or failed to start
-- `⠁` iris orbiting dot — a cron job, enabled and waiting for its next run (shown
-  with a live countdown that ticks down every second, e.g. `⠁ backup (next in 5m12s)`)
+- `✧` iris, twinkling slowly — a cron job, enabled and waiting for its next run (shown
+  with a live countdown that ticks down every second, e.g. `✧ backup (next in 5m12s)`)
+
+When there's room below your processes, the mascot keeps you company at the bottom
+of the sidebar.
 
 Pressing `s` on a cron job triggers an immediate one-off run, independent of its
 schedule — handy for testing a job without waiting for it to come due.
