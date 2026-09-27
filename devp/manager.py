@@ -6,7 +6,14 @@ import asyncio
 
 from devp.config import Config
 from devp.cron import CronJob
-from devp.process import ErrorCallback, ManagedProcess, OutputCallback, StateCallback
+from devp.process import (
+    ErrorCallback,
+    ManagedProcess,
+    OutputCallback,
+    ProcessState,
+    StateCallback,
+)
+from devp.watch import FileWatcher
 
 Runnable = ManagedProcess | CronJob
 
@@ -19,6 +26,7 @@ class ProcessManager:
         self._process_configs = config.processes
         self._cron_configs = config.crons
         self._on_error: ErrorCallback | None = None
+        self._watchers: list[FileWatcher] = []
 
     def build(
         self,
@@ -55,6 +63,7 @@ class ProcessManager:
         itself autostarted, and forms no cycle, so this can simply wait on a per-name
         event rather than compute an explicit topological order.
         """
+        self.start_watchers()
         settled = {name: asyncio.Event() for name in self.processes}
         ready: dict[str, bool] = {}
 
@@ -78,6 +87,29 @@ class ProcessManager:
 
         await asyncio.gather(*(start_one(name) for name in self.processes))
 
+    def start_watchers(self) -> None:
+        """Watch each process's `watch` globs, restarting it when a matching file changes."""
+        if self._watchers:
+            return
+        for runnable in self.processes.values():
+            if isinstance(runnable, ManagedProcess) and runnable.config.watch:
+                watcher = FileWatcher(
+                    runnable.config.watch,
+                    runnable.config.cwd or ".",
+                    lambda changed, process=runnable: self._restart_on_change(process, changed),
+                )
+                watcher.start()
+                self._watchers.append(watcher)
+
+    async def _restart_on_change(self, process: ManagedProcess, changed: list[str]) -> None:
+        # A process the user stopped stays stopped; a crashed one gets another try.
+        active = (ProcessState.STARTING, ProcessState.RUNNING, ProcessState.CRASHED)
+        if process.state not in active:
+            return
+        what = changed[0] if len(changed) == 1 else f"{len(changed)} files ({changed[0]}, ...)"
+        process.log(f"--- {what} changed, restarting ---")
+        await process.restart()
+
     def _skip_start(self, runnable: Runnable, not_ready: list[str]) -> None:
         deps = ", ".join(f"'{dep}'" for dep in not_ready)
         reason = f"not started: {deps} didn't become ready"
@@ -87,6 +119,9 @@ class ProcessManager:
 
     async def shutdown_all(self) -> None:
         """Stop every process/run and cron schedule, stopping dependents before their dependencies."""
+        for watcher in self._watchers:
+            await watcher.stop()
+        self._watchers.clear()
         for runnable in self.processes.values():
             if isinstance(runnable, CronJob):
                 await runnable.stop_schedule()

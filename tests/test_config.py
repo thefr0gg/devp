@@ -371,3 +371,14 @@ def test_invalid_ready_checks_rejected(tmp_path, snippet, message):
     path = write_config(tmp_path, f'[[process]]\nname = "api"\ncommand = "x"\n{snippet}\n')
     with pytest.raises(ConfigError, match=message):
         load_config(path)
+
+
+def test_watch_patterns_parse_and_validate(tmp_path):
+    path = write_config(
+        tmp_path, '[[process]]\nname = "api"\ncommand = "x"\nwatch = ["src/**/*.py", "*.toml"]\n'
+    )
+    assert load_config(path).processes[0].watch == ["src/**/*.py", "*.toml"]
+
+    path = write_config(tmp_path, '[[process]]\nname = "api"\ncommand = "x"\nwatch = "src"\n')
+    with pytest.raises(ConfigError, match="'watch' must be a list"):
+        load_config(path)

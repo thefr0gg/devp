@@ -146,6 +146,28 @@ spinner with an “is ready” toast. If it exits before becoming ready, or the 
 passes, the processes that depend on it are left stopped, with a note in their log
 explaining why. You can still start them yourself with `s`.
 
+### Restarting on file changes
+
+Give a process a `watch` list of glob patterns and devp restarts it whenever a
+matching file is added, changed, or deleted, like `nodemon`:
+
+```toml
+[[process]]
+name = "worker"
+command = "python worker.py"
+watch = ["src/**/*.py", "config/*.yaml"]
+```
+
+Patterns are relative to the process's `cwd` (or the directory devp runs in). `*`
+and `?` match within one directory level and `**` matches any number of levels, so
+`src/**/*.py` covers `src/app.py` as well as `src/pkg/mod.py`. `.git`,
+`node_modules`, `__pycache__`, virtualenvs, and tool caches are always skipped.
+
+devp checks for changes about once a second, logs which file changed
+(`--- src/app.py changed, restarting ---`), and restarts the process. It only
+restarts a process that's running, starting, or crashed; if you stopped it with `x`,
+it stays stopped until you start it again.
+
 ### Cron jobs
 
 A `[[cron]]` entry runs a command on a recurring schedule instead of continuously,
