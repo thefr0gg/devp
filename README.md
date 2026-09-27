@@ -76,7 +76,7 @@ Like `poetry.lock`, `devp.toml` records which versions it was written for, in a
 
 ```toml
 [devp]
-version = "0.1.0"        # devp version that generated this file
+version = "0.2.0"        # devp version that generated this file
 config-version = "1.1"   # config layout version; devp warns when it doesn't match
 ```
 

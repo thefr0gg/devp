@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "devp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A simple, TOML-configured process multiplexer TUI."
 authors = ["thefr0gg <ramsy0dev@gmail.com>"]
 license = "MIT"
