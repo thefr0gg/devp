@@ -207,6 +207,7 @@ class DevpApp(App[None]):
         ("S", "start_all", "Run all"),
         ("X", "stop_all", "Stop all"),
         ("c", "clear_log", "Clear log"),
+        ("G", "follow_log", "Follow"),
         ("slash", "search", "Search"),
         ("n", "next_match", "Next match"),
         ("N", "prev_match", "Prev match"),
@@ -318,6 +319,14 @@ class DevpApp(App[None]):
         title = _log_title(self.selected_name, self._selected_process())
         if self._log_pane.border_title != title:
             self._log_pane.border_title = title
+        below = self._log_view.lines_below
+        subtitle = (
+            f"[$accent]▼ {below} more line{'s' if below != 1 else ''} · G to follow[/]"
+            if below
+            else ""
+        )
+        if self._log_pane.border_subtitle != subtitle:
+            self._log_pane.border_subtitle = subtitle
 
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.
@@ -543,6 +552,10 @@ class DevpApp(App[None]):
         self.notify("Stopping everything", severity="information", timeout=2)
         # Same exclusive group as start_all: stopping cancels a start-all in progress.
         self.run_worker(self.manager.stop_all(), group="bulk", exclusive=True)
+
+    def action_follow_log(self) -> None:
+        """Jump to the newest output and keep following it (bound to 'G')."""
+        self._log_view.scroll_end(animate=False)
 
     def action_clear_log(self) -> None:
         """Clear the selected process's log (bound to 'c')."""

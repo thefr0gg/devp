@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 
 from rich.cells import cell_len
@@ -79,6 +79,14 @@ class LogView(ScrollView, can_focus=True):
     @property
     def line_count(self) -> int:
         return len(self._lines)
+
+    @property
+    def lines_below(self) -> int:
+        """How many lines start below the visible area (0 when following the tail)."""
+        bottom = self.scroll_offset.y + self.scrollable_content_region.height
+        if bottom >= self._total_rows:
+            return 0
+        return len(self._lines) - bisect_left(self._row_starts, bottom)
 
     @property
     def end_index(self) -> int:

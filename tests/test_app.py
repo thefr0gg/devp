@@ -428,3 +428,35 @@ async def test_log_title_shows_live_process_details():
         await _wait_for(lambda: "pid" not in str(log_pane.border_title))
         assert "exit" in log_pane.border_title
         await app.manager.shutdown_all()
+
+
+async def test_more_lines_indicator_and_follow():
+    app = make_app()
+    async with app.run_test(size=(80, 16)) as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        for i in range(100):
+            sleeper.log(f"line {i}")
+        log = app.query_one("#log")
+        log_pane = app.query_one("#log-pane")
+        await _wait_for(lambda: log.line_count == 100)
+        await pilot.pause()
+        assert log.lines_below == 0 and not log_pane.border_subtitle  # following the tail
+
+        log.scroll_home(animate=False)
+        await _wait_for(lambda: "more lines" in str(log_pane.border_subtitle))
+        assert f"▼ {log.lines_below} more lines" in log_pane.border_subtitle
+
+        sleeper.log("new while scrolled up")  # doesn't yank the view back down
+        await pilot.pause()
+        assert log.scroll_y == 0
+
+        await pilot.press("G")
+        await _wait_for(lambda: not log_pane.border_subtitle)
+        assert log.is_vertical_scroll_end
+
+        sleeper.log("followed again")  # following resumes
+        await _wait_for(lambda: log.find("followed again"))
+        await pilot.pause()
+        assert log.is_vertical_scroll_end
+        await app.manager.shutdown_all()
