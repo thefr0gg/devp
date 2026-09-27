@@ -16,6 +16,7 @@ from enum import Enum, auto
 
 from devp.ansi import resolve_overwrites, strip_ansi
 from devp.config import ProcessConfig
+from devp.shell import shell_argv
 
 _IS_WINDOWS = sys.platform == "win32"
 MAX_BUFFER_LINES = 5000
@@ -186,9 +187,13 @@ class ManagedProcess:
 
         try:
             if isinstance(self.config.command, str):
-                self._proc = await asyncio.create_subprocess_shell(
-                    self.config.command, **popen_kwargs
-                )
+                argv = shell_argv(self.config.shell, self.config.command)
+                if argv is None:  # the system default: sh, or COMSPEC (cmd) on Windows
+                    self._proc = await asyncio.create_subprocess_shell(
+                        self.config.command, **popen_kwargs
+                    )
+                else:
+                    self._proc = await asyncio.create_subprocess_exec(*argv, **popen_kwargs)
             else:
                 self._proc = await asyncio.create_subprocess_exec(
                     *self.config.command, **popen_kwargs

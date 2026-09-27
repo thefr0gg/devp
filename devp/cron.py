@@ -36,6 +36,7 @@ class CronJob:
                 cwd=config.cwd,
                 env=config.env,
                 autostart=False,
+                shell=config.shell,
             ),
             on_output=on_output,
             on_state_change=self._handle_inner_state_change,

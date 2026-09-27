@@ -73,7 +73,7 @@ Like `poetry.lock`, `devp.toml` records which versions it was written for, in a
 ```toml
 [devp]
 version = "0.1.0"        # devp version that generated this file
-config-version = "1.0"   # config layout version; devp warns when it doesn't match
+config-version = "1.1"   # config layout version; devp warns when it doesn't match
 ```
 
 `config-version` tracks the *layout* of the file, separately from devp's own
@@ -105,6 +105,7 @@ Each process is a `[[process]]` entry:
 | `autostart`   | no       | boolean                 | `true`           | Whether the process starts automatically when devp launches.      |
 | `autorestart` | no       | boolean                 | `false`          | Automatically restart the process if it crashes (see below).      |
 | `depends_on`  | no       | list of strings         | `[]`             | Other process/cron names that must be running first (see below).  |
+| `shell`       | no       | string or list          | system default   | Shell that runs a string `command` (see below).                   |
 
 **`command` as a string** runs through your shell — use this for anything with
 pipes, `&&`, or shell-specific syntax (`npm run dev`, `uvicorn app:app --reload`).
@@ -115,6 +116,30 @@ between — slightly faster, and immune to shell quoting surprises:
 ```toml
 command = ["python", "worker.py", "--verbose"]
 ```
+
+#### Choosing the shell
+
+String commands run in the system's default shell (`sh`, or `cmd` on Windows) unless
+you pick one, per process or cron job with `shell`, or for everything in a
+`[defaults]` table (a process's own `shell` wins):
+
+```toml
+[defaults]
+shell = "pwsh"                 # every string command runs in PowerShell 7
+
+[[process]]
+name = "api"
+command = "source .venv/bin/activate && uvicorn app:app --reload"
+shell = "bash"                 # this one needs bash
+```
+
+Give a shell's name (found on `PATH`) or its full path. devp passes the command the
+way each shell expects: `-c` for `bash`, `zsh`, `fish`, `sh` and other POSIX-style
+shells, and `-NoLogo -NoProfile -Command` for `pwsh` / `powershell`. For anything
+else, use a list: devp appends the command to it as the last argument, e.g.
+`shell = ["bash", "-lc"]` for a login shell, or `["pwsh", "-Command"]` to load your
+PowerShell profile. If the shell isn't installed, that process fails to start with
+an error saying so. `shell` has no effect on list commands, which never use a shell.
 
 If `devp.toml` is missing or invalid, devp prints a clear message describing what's
 wrong (and where) instead of a stack trace, and exits without launching the TUI.
@@ -243,6 +268,7 @@ schedule = "0 * * * *"   # every hour, on the hour
 | `env`       | no       | table of string→string | `{}`           | Extra environment variables for each run.                          |
 | `enabled`   | no       | boolean              | `true`           | Whether the schedule is active on launch (like a process's `autostart`). |
 | `depends_on`| no       | list of strings      | `[]`             | Other process/cron names that must be running first (see above).  |
+| `shell`     | no       | string or list       | system default   | Shell for a string `command`, as for processes (see above).        |
 
 Each run's output is appended to the job's log, with a separator line marking where
 it started, so you can scroll back through the history of previous runs. If a

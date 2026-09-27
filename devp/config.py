@@ -10,13 +10,17 @@ from typing import Any
 
 from devp import __version__
 
-CONFIG_VERSION = "1.0"
+CONFIG_VERSION = "1.1"
 """The layout version of devp.toml, recorded in its `[devp]` table as `config-version`.
 
 Bump the minor part for a backward-compatible layout change (a new optional key, say)
 and the major part for a breaking one (a renamed or removed key, a changed meaning).
 devp warns when a config's version differs in the minor part, and refuses a config
 whose major version differs, like Poetry does with its lock files.
+
+History:
+- 1.0: the initial layout.
+- 1.1: `shell` on processes and cron jobs, and a `[defaults]` table.
 """
 
 
@@ -39,6 +43,7 @@ class ProcessConfig:
     ready_port: int | None = None  # TCP port on localhost that must accept connections
     ready_timeout: float = 60.0
     watch: list[str] = field(default_factory=list)  # globs; restart the process on changes
+    shell: str | list[str] | None = None  # for string commands; None = the system default
 
     @property
     def has_ready_check(self) -> bool:
@@ -56,6 +61,7 @@ class CronConfig:
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
     depends_on: list[str] = field(default_factory=list)
+    shell: str | list[str] | None = None
 
 
 EntryConfig = ProcessConfig | CronConfig
@@ -178,11 +184,42 @@ def _validate_watch(entry: dict[str, Any], location: str, name: str) -> list[str
     return list(watch)
 
 
-def _parse_process(entry: dict[str, Any], location: str, seen_names: set[str]) -> ProcessConfig:
+def _validate_shell(value: Any, where: str) -> str | list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, list) and value and all(isinstance(p, str) and p for p in value):
+        return list(value)
+    raise ConfigError(
+        f"{where}: 'shell' must be a shell name or path (e.g. \"bash\"), "
+        "or a non-empty list like [\"pwsh\", \"-Command\"]"
+    )
+
+
+def _entry_shell(
+    entry: dict[str, Any], location: str, name: str, command: str | list[str], default: Any
+) -> str | list[str] | None:
+    """The entry's own `shell`, else `[defaults] shell`; only string commands use one."""
+    where = f"{location} ('{name}')"
+    if "shell" in entry:
+        if isinstance(command, list):
+            raise ConfigError(
+                f"{where}: 'shell' only applies to a string 'command'; a list 'command' "
+                "runs directly, without a shell"
+            )
+        return _validate_shell(entry["shell"], where)
+    return default
+
+
+def _parse_process(
+    entry: dict[str, Any], location: str, seen_names: set[str], default_shell: Any = None
+) -> ProcessConfig:
     name = _validate_name(entry, location, seen_names)
+    command = _validate_command(entry, location, name)
     return ProcessConfig(
         name=name,
-        command=_validate_command(entry, location, name),
+        command=command,
         cwd=_validate_cwd(entry, location, name),
         env=_validate_env(entry, location, name),
         autostart=_validate_bool(entry, "autostart", location, name, default=True),
@@ -190,11 +227,15 @@ def _parse_process(entry: dict[str, Any], location: str, seen_names: set[str]) -
         depends_on=_validate_depends_on(entry, location, name),
         **_validate_ready(entry, location, name),
         watch=_validate_watch(entry, location, name),
+        shell=_entry_shell(entry, location, name, command, default_shell),
     )
 
 
-def _parse_cron(entry: dict[str, Any], location: str, seen_names: set[str]) -> CronConfig:
+def _parse_cron(
+    entry: dict[str, Any], location: str, seen_names: set[str], default_shell: Any = None
+) -> CronConfig:
     name = _validate_name(entry, location, seen_names)
+    command = _validate_command(entry, location, name)
 
     schedule = entry.get("schedule")
     if not isinstance(schedule, str) or not schedule.strip():
@@ -206,12 +247,13 @@ def _parse_cron(entry: dict[str, Any], location: str, seen_names: set[str]) -> C
 
     return CronConfig(
         name=name,
-        command=_validate_command(entry, location, name),
+        command=command,
         schedule=schedule,
         cwd=_validate_cwd(entry, location, name),
         env=_validate_env(entry, location, name),
         enabled=_validate_bool(entry, "enabled", location, name, default=True),
         depends_on=_validate_depends_on(entry, location, name),
+        shell=_entry_shell(entry, location, name, command, default_shell),
     )
 
 
@@ -347,6 +389,11 @@ def load_config(path: Path) -> Config:
     devp_version, config_version = _read_metadata(data, display)
     warnings = check_versions(path.name, devp_version, config_version)
 
+    defaults = data.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ConfigError(f"{display}: '[defaults]' must be a table")
+    default_shell = _validate_shell(defaults.get("shell"), f"{display} [defaults]")
+
     raw_processes = data.get("process", [])
     if not isinstance(raw_processes, list):
         raise ConfigError(f"{display}: '[[process]]' must be an array of tables")
@@ -365,14 +412,14 @@ def load_config(path: Path) -> Config:
         location = f"[[process]] entry #{index + 1}"
         if not isinstance(entry, dict):
             raise ConfigError(f"{location} must be a table")
-        processes.append(_parse_process(entry, location, seen_names))
+        processes.append(_parse_process(entry, location, seen_names, default_shell))
 
     crons: list[CronConfig] = []
     for index, entry in enumerate(raw_crons):
         location = f"[[cron]] entry #{index + 1}"
         if not isinstance(entry, dict):
             raise ConfigError(f"{location} must be a table")
-        crons.append(_parse_cron(entry, location, seen_names))
+        crons.append(_parse_cron(entry, location, seen_names, default_shell))
 
     all_entries: dict[str, EntryConfig] = {c.name: c for c in (*processes, *crons)}
     _validate_dependency_graph(all_entries)
