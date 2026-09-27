@@ -187,3 +187,34 @@ async def test_running_process_glyph_animates():
         assert item.label_text != first
 
         await app.manager.shutdown_all()
+
+
+async def test_toasts_that_do_not_fit_the_window_are_dropped_oldest_first():
+    app = make_app()
+    async with app.run_test(size=(80, 16), notifications=True) as pilot:
+        await pilot.pause()
+        app.clear_notifications()
+        for i in range(10):
+            app.notify(f"note {i}", timeout=30)
+        await pilot.pause()
+        messages = [n.message for n in app._notifications]
+        assert 1 <= len(messages) < 10
+        assert messages[-1] == "note 9"
+        for toast in app.screen.query("Toast"):
+            assert toast.region.y >= 1  # nothing pushed above the top of the log pane
+
+        await app.manager.shutdown_all()
+
+
+async def test_toasts_move_above_the_search_bar_while_it_is_open():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.has_class("-searching")
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.has_class("-searching")
+
+        await app.manager.shutdown_all()

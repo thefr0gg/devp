@@ -7,6 +7,8 @@ from datetime import datetime
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.events import Resize
+from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
 
@@ -22,6 +24,10 @@ _GLYPH_FRAME_INTERVAL = 0.1
 # Output is buffered and written to the log pane in batches at most this often, so a
 # chatty process costs one render per frame instead of one message + render per line.
 _LOG_FLUSH_INTERVAL = 1 / 30
+# Rows the toast stack must leave free (pane top border, plus the rack's bottom margin
+# with the search bar open), and the tallest a typical toast gets (border, title, text).
+_TOAST_RESERVED_ROWS = 6
+_TOAST_ROWS = 4
 
 
 def _status_detail(runnable: object) -> str | None:
@@ -93,17 +99,35 @@ class DevpApp(App[None]):
     #log {
         height: 1fr;
         background: transparent;
+        /* Blend the track into the pane instead of a solid black strip. */
+        scrollbar-background: transparent;
+        scrollbar-background-hover: transparent;
+        scrollbar-background-active: transparent;
     }
-    /* Notifications: compact rounded cards matching the panes, tinted by severity. */
+    /* Notifications: rounded outlines like the panes, colored by severity, stacked in
+       the bottom-right of the log pane. The fill is transparent because a box-drawing
+       line sits mid-cell, so any fill color would spill half a cell outside it and read
+       as a second border. The rack's spacing keeps toasts inside the log pane: clear of
+       the sidebar (32 cols) and the pane's left border on the left, the pane border
+       and scrollbar on the right, and the pane border plus footer below. Widths are
+       then relative to the pane, so toasts shrink with small windows, and
+       `DevpApp._trim_toasts` drops the oldest ones that don't fit vertically. */
     ToastRack {
-        margin: 0 2 1 0;
+        margin-bottom: 2;
+        /* Horizontal offsets must be padding: the docked rack ignores side margins.
+           Right: 1 col of padding + the rack's own 2-col (invisible) scrollbar gutter
+           clears the log's scrollbar and the pane border. */
+        padding: 0 1 0 33;
+    }
+    DevpApp.-searching ToastRack {
+        margin-bottom: 5;  /* stay above the search bar while it's open */
     }
     Toast {
         width: 44;
-        max-width: 60%;
+        max-width: 100%;
         margin-top: 0;
         padding: 0 1;
-        background: $surface;
+        background: transparent;
         border: round $panel;
     }
     Toast.-information {
@@ -169,6 +193,28 @@ class DevpApp(App[None]):
                 yield self._log_view
                 yield Input(placeholder="› search logs", id="search-input")
         yield Footer()
+
+    def _on_notify(self, event: Notify) -> None:
+        super()._on_notify(event)
+        self._trim_toasts()
+
+    def on_resize(self, event: Resize) -> None:
+        self._trim_toasts()
+
+    def _trim_toasts(self) -> None:
+        """Drop the oldest toasts that won't fit in the log pane at the current height.
+
+        Textual shows every live notification, so a burst (e.g. autostart) in a short
+        window would stack toasts off the top of the screen. Textual has no public API
+        for dismissing a single notification, hence `_notifications` / `_unnotify`.
+        """
+        fits = max(1, (self.size.height - _TOAST_RESERVED_ROWS) // _TOAST_ROWS)
+        notifications = list(self._notifications)
+        if len(notifications) <= fits:
+            return
+        for notification in notifications[:-fits]:
+            self._unnotify(notification, refresh=False)
+        self._refresh_notifications()
 
     async def on_mount(self) -> None:
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
@@ -278,6 +324,7 @@ class DevpApp(App[None]):
         self._pre_search_focus = self.focused
         search_input = self.query_one("#search-input", Input)
         search_input.display = True
+        self.add_class("-searching")
         search_input.focus()
 
     def _close_search_input(self, *, focus_log: bool = False) -> None:
@@ -291,6 +338,7 @@ class DevpApp(App[None]):
         """
         search_input = self.query_one("#search-input", Input)
         search_input.display = False
+        self.remove_class("-searching")
         search_input.value = ""
         target = self._pre_search_focus
         self._pre_search_focus = None
