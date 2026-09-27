@@ -402,6 +402,7 @@ async def test_clear_log_empties_the_selected_process_buffer():
         log = app.query_one("#log")
         await _wait_for(lambda: log.line_count == 1)
 
+        log.focus()  # c belongs to the log pane
         await pilot.press("c")
         await pilot.pause()
         assert log.line_count == 0 and len(sleeper.output) == 0
@@ -451,6 +452,7 @@ async def test_more_lines_indicator_and_follow():
         await pilot.pause()
         assert log.scroll_y == 0
 
+        log.focus()  # G belongs to the log pane
         await pilot.press("G")
         await _wait_for(lambda: not log_pane.border_subtitle)
         assert log.is_vertical_scroll_end
@@ -462,21 +464,74 @@ async def test_more_lines_indicator_and_follow():
         await app.manager.shutdown_all()
 
 
-async def test_help_screen_opens_and_closes_and_footer_is_trimmed():
+async def test_help_screen_opens_and_closes():
     from devp.screens import HelpScreen
 
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        from textual.binding import Binding
-
-        shown = {b.key for b in Binding.make_bindings(app.BINDINGS) if b.show}
-        assert shown == {"s", "x", "r", "slash", "question_mark", "q"}
-
         await pilot.press("question_mark")
         await pilot.pause()
         assert isinstance(app.screen, HelpScreen)
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, HelpScreen)
+        await app.manager.shutdown_all()
+
+
+def footer_keys(app) -> set[str]:
+    """The keys the footer shows right now (enabled, visible bindings)."""
+    return {
+        key
+        for key, active in app.screen.active_bindings.items()
+        if active.binding.show and active.enabled
+    }
+
+
+async def test_footer_shows_only_the_keys_that_work_where_focus_is():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        processes = {"s", "x", "r", "S", "X", "slash", "question_mark", "q"}
+        assert footer_keys(app) == processes
+
+        app.query_one("#log").focus()
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "question_mark", "q"}
+
+        await pilot.press("slash")
+        await pilot.pause()
+        assert footer_keys(app) == {"enter", "escape"}  # typing into the search bar
+        assert app.screen.active_bindings["escape"].binding.description == "Cancel"
+
+        await pilot.press(*"zzz", "enter")  # run a search; focus returns to the log
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "n", "N", "escape", "question_mark", "q"}
+        assert app.screen.active_bindings["escape"].binding.description == "End search"
+
+        await pilot.press("escape")  # clear the search: n / N / Esc go away again
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "question_mark", "q"}
+
+        app.query_one("#sidebar").focus()
+        await pilot.pause()
+        assert footer_keys(app) == processes
+        await app.manager.shutdown_all()
+
+
+async def test_process_keys_do_nothing_outside_the_process_list():
+    app = make_app(autostart=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        app.query_one("#log").focus()
+        await pilot.pause()
+        await pilot.press("s")
+        await asyncio.sleep(0.3)
+        assert sleeper.state == ProcessState.STOPPED
+
+        app.query_one("#sidebar").focus()
+        await pilot.pause()
+        await pilot.press("s")
+        await _wait_for(lambda: sleeper.state == ProcessState.RUNNING)
         await app.manager.shutdown_all()

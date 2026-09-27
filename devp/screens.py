@@ -91,40 +91,44 @@ class ReloadConfigScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+# Grouped by where each key works; the footer shows the same keys per focused pane.
 HELP_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
     (
-        "Processes",
+        "Process list",
         [
             ("↑ / ↓", "Select a process"),
             ("s", "Run the selected process (a cron job runs now)"),
             ("x", "Stop the selected process"),
             ("r", "Restart the selected process"),
             ("S / X", "Start / stop everything, in depends_on order"),
+            ("/", "Search the selected process's log"),
             ("double-click", "Run the clicked process"),
         ],
     ),
     (
-        "Logs",
+        "Log pane",
         [
-            ("Tab", "Move focus between the sidebar and the log"),
-            ("PgUp / PgDn", "Scroll the log (Home / End in the log too)"),
+            ("PgUp / PgDn", "Scroll (Home / End jump to the top / bottom)"),
             ("G", "Jump to the newest output and follow it"),
-            ("c", "Clear the selected process's log"),
-            ("drag", "Select log text with the mouse"),
+            ("c", "Clear this log"),
+            ("/", "Search this log"),
+            ("n / N", "Next / previous match (after a search)"),
+            ("Esc", "Clear the search highlighting"),
+            ("drag", "Select text with the mouse"),
             ("Ctrl+C", "Copy the selection (quits when nothing is selected)"),
         ],
     ),
     (
-        "Search",
+        "Search bar",
         [
-            ("/", "Search the selected process's log"),
-            ("n / N", "Next / previous match"),
-            ("Esc", "Close the search and clear highlighting"),
+            ("Enter", "Search and jump to the first match"),
+            ("Esc", "Cancel"),
         ],
     ),
     (
-        "General",
+        "Anywhere",
         [
+            ("Tab", "Switch between the process list and the log pane"),
             ("?", "Show or hide this help"),
             ("q", "Quit (stops every process first)"),
         ],

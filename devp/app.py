@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from functools import partial
+from typing import ClassVar
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -16,6 +17,8 @@ from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
+from textual.app import ScreenStackError
+from textual.screen import ModalScreen
 from textual.worker import Worker
 
 from devp.clipboard import copy_native
@@ -85,6 +88,16 @@ def _osc_color(color: str) -> str:
     """A color as `rgb:RR/GG/BB`, the format every OSC 10/11 terminal accepts."""
     r, g, b = Color.parse(color).rgb
     return f"rgb:{r:02x}/{g:02x}/{b:02x}"
+
+
+class SearchInput(Input):
+    """The log search bar, with Enter shown in the footer while it has focus."""
+
+    BINDINGS = [
+        Binding("enter", "submit", "Search"),
+        # Same action as the app's Escape, but labelled for what it does here.
+        Binding("escape", "app.close_search", "Cancel"),
+    ]
 
 
 class ProcessListItem(ListItem):
@@ -215,25 +228,43 @@ class DevpApp(App[None]):
 
     ENABLE_COMMAND_PALETTE = False
 
-    # Only the everyday keys are shown in the footer (so it fits narrow windows);
-    # `?` opens a help screen listing everything.
+    # Which keys apply depends on where you are (see `check_action`), and the footer
+    # only ever shows the ones that work there.
     BINDINGS = [
         ("s", "start_selected", "Run"),
         ("x", "stop_selected", "Stop"),
         ("r", "restart_selected", "Restart"),
+        ("S", "start_all", "Run all"),
+        ("X", "stop_all", "Stop all"),
         ("slash", "search", "Search"),
+        ("n", "next_match", "Next"),
+        ("N", "prev_match", "Prev"),
+        ("escape", "close_search", "End search"),
+        ("G", "follow_log", "Follow"),
+        ("c", "clear_log", "Clear"),
         ("question_mark", "help", "Help"),
         ("q", "quit", "Quit"),
-        Binding("S", "start_all", "Run all", show=False),
-        Binding("X", "stop_all", "Stop all", show=False),
-        Binding("c", "clear_log", "Clear log", show=False),
-        Binding("G", "follow_log", "Follow", show=False),
-        Binding("n", "next_match", "Next match", show=False),
-        Binding("N", "prev_match", "Prev match", show=False),
-        Binding("escape", "close_search", "Close search", show=False),
         # Priority, so it wins over the screen's own silent copy binding.
         Binding("ctrl+c", "copy_or_quit", "Copy / Quit", show=False, priority=True),
     ]
+
+    # The contexts each action is available in: the process list, the log pane, and
+    # the search bar. Actions not listed here are always available.
+    ACTION_CONTEXTS: ClassVar[dict[str, frozenset[str]]] = {
+        "start_selected": frozenset({"processes"}),
+        "stop_selected": frozenset({"processes"}),
+        "restart_selected": frozenset({"processes"}),
+        "start_all": frozenset({"processes"}),
+        "stop_all": frozenset({"processes"}),
+        "search": frozenset({"processes", "log"}),
+        "next_match": frozenset({"log"}),
+        "prev_match": frozenset({"log"}),
+        "close_search": frozenset({"log", "search"}),
+        "follow_log": frozenset({"log"}),
+        "clear_log": frozenset({"log"}),
+        "help": frozenset({"processes", "log"}),
+        "quit": frozenset({"processes", "log"}),
+    }
 
     def __init__(self, manager: ProcessManager, config_path: Path | None = None) -> None:
         # ansi_color: draw the base background and text in the terminal's *default*
@@ -256,7 +287,7 @@ class DevpApp(App[None]):
         self._process_names = list(manager.processes.keys())
         self.selected_name: str | None = self._process_names[0] if self._process_names else None
         self._list_items: dict[str, ProcessListItem] = {}
-        self._search_query = ""
+        self._search_text = ""
         self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
         self._pending_lines: list[str] = []
@@ -272,8 +303,53 @@ class DevpApp(App[None]):
             yield ListView(*self._make_list_items(), id="sidebar")
             with self._log_pane:
                 yield self._log_view
-                yield Input(placeholder="› search logs", id="search-input")
+                yield SearchInput(placeholder="› search logs", id="search-input")
         yield Footer()
+
+    @property
+    def _search_query(self) -> str:
+        """The active log search (empty when none); changing it updates the footer."""
+        return self._search_text
+
+    @_search_query.setter
+    def _search_query(self, query: str) -> None:
+        if query != self._search_text:
+            self._search_text = query
+            if self.is_running:
+                self.refresh_bindings()  # n / N / Esc only apply while searching
+
+    def _focus_context(self) -> str:
+        """Where keyboard focus is: 'processes', 'log', 'search', or 'dialog'."""
+        try:
+            screen = self.screen
+        except ScreenStackError:  # asked before the first screen is up
+            return "processes"
+        if isinstance(screen, ModalScreen):
+            return "dialog"
+        focused = self.focused
+        if isinstance(focused, SearchInput):
+            return "search"
+        if focused is self._log_view:
+            return "log"
+        return "processes"
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Enable (and show in the footer) only the actions that apply where focus is."""
+        contexts = self.ACTION_CONTEXTS.get(action)
+        if contexts is None:
+            return True
+        context = self._focus_context()
+        if context not in contexts:
+            return False
+        if action in ("next_match", "prev_match") or (action == "close_search" and context == "log"):
+            return bool(self._search_query)  # only meaningful while a search is active
+        return True
+
+    def on_descendant_focus(self) -> None:
+        self.refresh_bindings()
+
+    def on_descendant_blur(self) -> None:
+        self.refresh_bindings()
 
     def _make_list_items(self) -> list[ProcessListItem]:
         self._list_items = {}
@@ -543,11 +619,10 @@ class DevpApp(App[None]):
         self._log_view.scroll_to_line(index)
 
     def action_close_search(self) -> None:
-        """Close the search bar and clear any active search highlighting (bound to Escape)."""
+        """Close the search bar and/or clear the active search (bound to Escape)."""
         search_input = self.query_one("#search-input", Input)
-        if not search_input.display:
-            return
-        self._close_search_input()
+        if search_input.display:
+            self._close_search_input()
         if self._search_query:
             self._search_query = ""
             self._search_cursor = None
