@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 
 from rich.markup import escape
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, ListItem, ListView, RichLog
 
 from devp.cron import CronJob
@@ -120,6 +122,12 @@ class DevpApp(App[None]):
         ("q", "quit", "Quit"),
         ("ctrl+c", "quit", "Quit"),
     ]
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        """Offer Textual's built-in palette commands, minus the theme selector."""
+        for command in super().get_system_commands(screen):
+            if command.callback != self.action_change_theme:
+                yield command
 
     def __init__(self, manager: ProcessManager) -> None:
         super().__init__()
