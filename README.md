@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/mascot.png" alt="devp's mascot: a pixel-art bunny in a top hat, waving a magic wand" width="192">
+</p>
+
 # devp
 
 A simple, TOML-configured process multiplexer for your terminal — a lighter-weight
