@@ -122,3 +122,55 @@ async def test_focused_pane_border_is_highlighted():
         assert log_pane.styles.border_top[1] == sidebar_focused_color
         assert sidebar.styles.border_top[1] != sidebar_focused_color
         assert log_pane.border_title == "Logs · sleeper"
+
+
+async def test_search_highlights_and_navigates_matches():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        for i in range(30):
+            sleeper.log(f"{'needle' if i % 10 == 0 else 'hay'} {i}")
+        await asyncio.sleep(0.1)
+        log = app.query_one("#log")
+        assert log.line_count == 30
+
+        await pilot.press("slash")
+        for ch in "needle":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        matches = log.find("needle")
+        assert len(matches) == 3
+        assert app._search_cursor == matches[0]
+
+        await pilot.press("n")
+        assert app._search_cursor == matches[1]
+        await pilot.press("N", "N")
+        assert app._search_cursor == matches[2]  # wrapped around
+
+        await app.manager.shutdown_all()
+
+
+async def test_output_of_unselected_processes_is_not_written_to_the_log():
+    config = Config(
+        processes=[
+            ProcessConfig(name="a", command=python_command("import time; time.sleep(30)")),
+            ProcessConfig(name="b", command=python_command("import time; time.sleep(30)")),
+        ],
+        crons=[],
+    )
+    app = DevpApp(ProcessManager(config))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.manager.processes["b"].log("from b")
+        app.manager.processes["a"].log("from a")
+        await asyncio.sleep(0.1)
+        log = app.query_one("#log")
+        assert log.find("from") == [log.end_index - 1]
+
+        await pilot.press("down")  # select 'b': its buffered output is replayed
+        await pilot.pause()
+        assert log.line_count == 1 and log.find("from b")
+
+        await app.manager.shutdown_all()

@@ -11,16 +11,6 @@ from textual.message import Message
 from devp.process import ProcessState
 
 
-class LogLine(Message):
-    """A new line of output was produced by `process_name`."""
-
-    def __init__(self, process_name: str, line: str, generation: int = 0) -> None:
-        super().__init__()
-        self.process_name = process_name
-        self.generation = generation
-        self.line = line
-
-
 class ProcessStateChanged(Message):
     """`process_name` transitioned to a new `ProcessState`."""
 
