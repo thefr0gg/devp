@@ -535,3 +535,16 @@ async def test_process_keys_do_nothing_outside_the_process_list():
         await pilot.press("s")
         await _wait_for(lambda: sleeper.state == ProcessState.RUNNING)
         await app.manager.shutdown_all()
+
+
+async def test_config_version_warnings_are_shown_as_toasts():
+    config = Config(
+        processes=[ProcessConfig(name="api", command=python_command("pass"), autostart=False)],
+        crons=[],
+        warnings=["devp.toml doesn't record a config-version"],
+    )
+    app = DevpApp(ProcessManager(config))
+    async with app.run_test(notifications=True) as pilot:
+        await pilot.pause()
+        [toast] = [n for n in app._notifications if n.title == "Config version"]
+        assert toast.severity == "warning" and "config-version" in toast.message

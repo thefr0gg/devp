@@ -403,6 +403,7 @@ class DevpApp(App[None]):
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
         if self._config_path is not None:
             self.set_interval(_CONFIG_POLL_INTERVAL, self._check_config)
+        self._show_config_warnings()
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
 
@@ -701,6 +702,11 @@ class DevpApp(App[None]):
         summary = f"{lines} lines" if lines > 1 else f"{len(text)} characters"
         self.notify(f"Copied {summary}", severity="information", timeout=2)
 
+    def _show_config_warnings(self) -> None:
+        """Surface config version mismatches (see `check_versions`) as warning toasts."""
+        for warning in self.manager.config.warnings:
+            self.notify(escape(warning), title="Config version", severity="warning", timeout=20)
+
     def _check_config(self) -> None:
         """Offer to reload devp.toml when it's been saved with a meaningful change."""
         if self._reloading or self._config_path is None:
@@ -761,6 +767,7 @@ class DevpApp(App[None]):
 
             self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
             self.notify("Config reloaded", severity="information", timeout=3)
+            self._show_config_warnings()
         finally:
             self._reloading = False
 
