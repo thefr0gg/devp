@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from functools import partial
+from typing import ClassVar
 
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -15,14 +17,18 @@ from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
+from textual.app import ScreenStackError
+from textual.screen import ModalScreen
 from textual.worker import Worker
 
 from devp.clipboard import copy_native
+from devp.config import Config, ConfigError, load_config
 from devp.cron import CronJob
 from devp.log_view import LogView
 from devp.manager import ProcessManager
 from devp.messages import ProcessError, ProcessStateChanged
 from devp.process import MAX_BUFFER_LINES, ProcessState
+from devp.screens import HelpScreen, ReloadConfigScreen
 from devp.widgets import format_duration, is_animated, status_label
 
 # How often animated sidebar glyphs advance a frame (also ticks cron countdowns).
@@ -34,6 +40,18 @@ _LOG_FLUSH_INTERVAL = 1 / 30
 # with the search bar open), and the tallest a typical toast gets (border, title, text).
 _TOAST_RESERVED_ROWS = 6
 _TOAST_ROWS = 4
+_CONFIG_POLL_INTERVAL = 1.0
+
+
+def _file_stamp(path: Path | None) -> tuple[int, int] | None:
+    """A cheap fingerprint of a file (mtime, size) to notice it being saved."""
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _status_detail(runnable: object) -> str | None:
@@ -48,10 +66,38 @@ def _status_detail(runnable: object) -> str | None:
     return None
 
 
+def _log_title(name: str | None, runnable: object | None) -> str:
+    """The log pane title: the process name plus live details, e.g.
+    `Logs · api · pid 4312 · up 5m12s · restarts 2`, or `Logs · api · exit 1`."""
+    if name is None or runnable is None:
+        return "Logs"
+    details = []
+    pid = getattr(runnable, "pid", None)
+    if pid is not None:
+        details += [f"pid {pid}", f"up {format_duration(runnable.uptime or 0)}"]
+        restarts = runnable.start_count - 1
+        if restarts > 0 and not isinstance(runnable, CronJob):
+            details.append(f"restarts {restarts}")
+    elif runnable.exit_code is not None:
+        details.append(f"exit {runnable.exit_code}")
+    title = f"Logs · {escape(name)}"
+    return title + "".join(f" [dim]· {detail}[/dim]" for detail in details)
+
+
 def _osc_color(color: str) -> str:
     """A color as `rgb:RR/GG/BB`, the format every OSC 10/11 terminal accepts."""
     r, g, b = Color.parse(color).rgb
     return f"rgb:{r:02x}/{g:02x}/{b:02x}"
+
+
+class SearchInput(Input):
+    """The log search bar, with Enter shown in the footer while it has focus."""
+
+    BINDINGS = [
+        Binding("enter", "submit", "Search"),
+        # Same action as the app's Escape, but labelled for what it does here.
+        Binding("escape", "app.close_search", "Cancel"),
+    ]
 
 
 class ProcessListItem(ListItem):
@@ -182,20 +228,45 @@ class DevpApp(App[None]):
 
     ENABLE_COMMAND_PALETTE = False
 
+    # Which keys apply depends on where you are (see `check_action`), and the footer
+    # only ever shows the ones that work there.
     BINDINGS = [
         ("s", "start_selected", "Run"),
         ("x", "stop_selected", "Stop"),
         ("r", "restart_selected", "Restart"),
+        ("S", "start_all", "Run all"),
+        ("X", "stop_all", "Stop all"),
         ("slash", "search", "Search"),
-        ("n", "next_match", "Next match"),
-        ("N", "prev_match", "Prev match"),
-        ("escape", "close_search", "Close search"),
+        ("n", "next_match", "Next"),
+        ("N", "prev_match", "Prev"),
+        ("escape", "close_search", "End search"),
+        ("G", "follow_log", "Follow"),
+        ("c", "clear_log", "Clear"),
+        ("question_mark", "help", "Help"),
         ("q", "quit", "Quit"),
         # Priority, so it wins over the screen's own silent copy binding.
         Binding("ctrl+c", "copy_or_quit", "Copy / Quit", show=False, priority=True),
     ]
 
-    def __init__(self, manager: ProcessManager) -> None:
+    # The contexts each action is available in: the process list, the log pane, and
+    # the search bar. Actions not listed here are always available.
+    ACTION_CONTEXTS: ClassVar[dict[str, frozenset[str]]] = {
+        "start_selected": frozenset({"processes"}),
+        "stop_selected": frozenset({"processes"}),
+        "restart_selected": frozenset({"processes"}),
+        "start_all": frozenset({"processes"}),
+        "stop_all": frozenset({"processes"}),
+        "search": frozenset({"processes", "log"}),
+        "next_match": frozenset({"log"}),
+        "prev_match": frozenset({"log"}),
+        "close_search": frozenset({"log", "search"}),
+        "follow_log": frozenset({"log"}),
+        "clear_log": frozenset({"log"}),
+        "help": frozenset({"processes", "log"}),
+        "quit": frozenset({"processes", "log"}),
+    }
+
+    def __init__(self, manager: ProcessManager, config_path: Path | None = None) -> None:
         # ansi_color: draw the base background and text in the terminal's *default*
         # colors instead of painting the theme's. Terminals pad the character grid with
         # a margin no app can draw in, filled with that default background, so painting
@@ -205,16 +276,18 @@ class DevpApp(App[None]):
         # the terminal allows it.
         super().__init__(ansi_color=True)
         self.theme = "rose-pine"
+        # Bumped on every config reload; events from an older manager's processes carry
+        # an older generation and are ignored.
+        self._generation = 0
         self.manager = manager
-        self.manager.build(
-            on_output=self._on_output,
-            on_state_change=self._on_state_change,
-            on_error=self._on_error,
-        )
+        self._wire(manager)
+        self._config_path = config_path
+        self._config_stamp = _file_stamp(config_path)
+        self._reloading = False
         self._process_names = list(manager.processes.keys())
         self.selected_name: str | None = self._process_names[0] if self._process_names else None
         self._list_items: dict[str, ProcessListItem] = {}
-        self._search_query = ""
+        self._search_text = ""
         self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
         self._pending_lines: list[str] = []
@@ -222,21 +295,80 @@ class DevpApp(App[None]):
         self._glyph_frame = 0
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
+        self._log_pane = Vertical(id="log-pane")
 
     def compose(self) -> ComposeResult:
         """Lay out the sidebar (process list) and the log pane side by side."""
         with Horizontal():
-            items = []
-            for name in self._process_names:
-                runnable = self.manager.processes[name]
-                item = ProcessListItem(name, runnable.state, detail=_status_detail(runnable))
-                self._list_items[name] = item
-                items.append(item)
-            yield ListView(*items, id="sidebar")
-            with Vertical(id="log-pane"):
+            yield ListView(*self._make_list_items(), id="sidebar")
+            with self._log_pane:
                 yield self._log_view
-                yield Input(placeholder="› search logs", id="search-input")
+                yield SearchInput(placeholder="› search logs", id="search-input")
         yield Footer()
+
+    @property
+    def _search_query(self) -> str:
+        """The active log search (empty when none); changing it updates the footer."""
+        return self._search_text
+
+    @_search_query.setter
+    def _search_query(self, query: str) -> None:
+        if query != self._search_text:
+            self._search_text = query
+            if self.is_running:
+                self.refresh_bindings()  # n / N / Esc only apply while searching
+
+    def _focus_context(self) -> str:
+        """Where keyboard focus is: 'processes', 'log', 'search', or 'dialog'."""
+        try:
+            screen = self.screen
+        except ScreenStackError:  # asked before the first screen is up
+            return "processes"
+        if isinstance(screen, ModalScreen):
+            return "dialog"
+        focused = self.focused
+        if isinstance(focused, SearchInput):
+            return "search"
+        if focused is self._log_view:
+            return "log"
+        return "processes"
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Enable (and show in the footer) only the actions that apply where focus is."""
+        contexts = self.ACTION_CONTEXTS.get(action)
+        if contexts is None:
+            return True
+        context = self._focus_context()
+        if context not in contexts:
+            return False
+        if action in ("next_match", "prev_match") or (action == "close_search" and context == "log"):
+            return bool(self._search_query)  # only meaningful while a search is active
+        return True
+
+    def on_descendant_focus(self) -> None:
+        self.refresh_bindings()
+
+    def on_descendant_blur(self) -> None:
+        self.refresh_bindings()
+
+    def _make_list_items(self) -> list[ProcessListItem]:
+        self._list_items = {}
+        for name in self._process_names:
+            runnable = self.manager.processes[name]
+            item = ProcessListItem(name, runnable.state, detail=_status_detail(runnable))
+            self._list_items[name] = item
+        return list(self._list_items.values())
+
+    def _wire(self, manager: ProcessManager) -> None:
+        """Build `manager`'s processes with callbacks tagged with the current generation."""
+        generation = self._generation
+        manager.build(
+            on_output=lambda name, line: self._on_output(name, line, generation),
+            on_state_change=lambda name, state: self.post_message(
+                ProcessStateChanged(name, state, generation)
+            ),
+            on_error=lambda name, text: self.post_message(ProcessError(name, text, generation)),
+        )
 
     def _on_notify(self, event: Notify) -> None:
         super()._on_notify(event)
@@ -269,6 +401,9 @@ class DevpApp(App[None]):
         sidebar.focus()
         self._refresh_log_pane()
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
+        if self._config_path is not None:
+            self.set_interval(_CONFIG_POLL_INTERVAL, self._check_config)
+        self._show_config_warnings()
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
 
@@ -290,6 +425,21 @@ class DevpApp(App[None]):
         if self._driver is not None:
             self._driver.write("\x1b]111\x07\x1b]110\x07")
 
+    def _update_log_title(self) -> None:
+        if not self._log_pane.is_attached:  # the sidebar timer can fire during shutdown
+            return
+        title = _log_title(self.selected_name, self._selected_process())
+        if self._log_pane.border_title != title:
+            self._log_pane.border_title = title
+        below = self._log_view.lines_below
+        subtitle = (
+            f"[$accent]▼ {below} more line{'s' if below != 1 else ''} · G to follow[/]"
+            if below
+            else ""
+        )
+        if self._log_pane.border_subtitle != subtitle:
+            self._log_pane.border_subtitle = subtitle
+
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.
 
@@ -302,14 +452,15 @@ class DevpApp(App[None]):
             state = runnable.state
             if is_animated(state) or isinstance(runnable, CronJob):
                 item.set_status(state, _status_detail(runnable), self._glyph_frame)
+        self._update_log_title()  # uptime ticks; pid/exit code change with the state
 
-    def _on_output(self, process_name: str, line: str) -> None:
+    def _on_output(self, process_name: str, line: str, generation: int) -> None:
         """Queue a line of the selected process's output for the next batched log write.
 
         Other processes' output needs no UI work: it's already in their scrollback
         buffer and gets replayed when they're selected.
         """
-        if process_name != self.selected_name:
+        if process_name != self.selected_name or generation != self._generation:
             return
         self._pending_lines.append(line)
         if self._flush_timer is None:
@@ -329,16 +480,10 @@ class DevpApp(App[None]):
             self._flush_timer = None
         self._pending_lines = []
 
-    def _on_state_change(self, process_name: str, state: ProcessState) -> None:
-        """Forward a process's state change into the app's message queue."""
-        self.post_message(ProcessStateChanged(process_name, state))
-
-    def _on_error(self, process_name: str, text: str) -> None:
-        """Forward a process error into the app's message queue."""
-        self.post_message(ProcessError(process_name, text))
-
     def on_process_state_changed(self, message: ProcessStateChanged) -> None:
         """Refresh the sidebar glyph and show a brief toast for the new state."""
+        if message.generation != self._generation:
+            return
         item = self._list_items.get(message.process_name)
         if item is not None:
             runnable = self.manager.processes.get(message.process_name)
@@ -356,6 +501,8 @@ class DevpApp(App[None]):
 
     def on_process_error(self, message: ProcessError) -> None:
         """Show a process failure (bad command, crash) as an error toast."""
+        if message.generation != self._generation:
+            return
         self.notify(
             escape(message.text),
             title=escape(message.process_name),
@@ -373,9 +520,7 @@ class DevpApp(App[None]):
 
     def _refresh_log_pane(self) -> None:
         """Clear the log pane and replay the selected process's buffered output into it."""
-        self.query_one("#log-pane").border_title = (
-            f"Logs · {escape(self.selected_name)}" if self.selected_name else "Logs"
-        )
+        self._update_log_title()
         self._discard_pending_lines()
         log = self._log_view
         log.clear()
@@ -475,11 +620,10 @@ class DevpApp(App[None]):
         self._log_view.scroll_to_line(index)
 
     def action_close_search(self) -> None:
-        """Close the search bar and clear any active search highlighting (bound to Escape)."""
+        """Close the search bar and/or clear the active search (bound to Escape)."""
         search_input = self.query_one("#search-input", Input)
-        if not search_input.display:
-            return
-        self._close_search_input()
+        if search_input.display:
+            self._close_search_input()
         if self._search_query:
             self._search_query = ""
             self._search_cursor = None
@@ -502,6 +646,34 @@ class DevpApp(App[None]):
         process = self._selected_process()
         if process is not None:
             await process.restart()
+
+    def action_start_all(self) -> None:
+        """Start every process and cron schedule, in dependency order (bound to 'S')."""
+        self.notify("Starting everything", severity="information", timeout=2)
+        self.run_worker(self.manager.start_all(), group="bulk", exclusive=True)
+
+    def action_stop_all(self) -> None:
+        """Stop every process and cron schedule, dependents first (bound to 'X')."""
+        if self._autostart is not None:
+            self._autostart.cancel()
+        self.notify("Stopping everything", severity="information", timeout=2)
+        # Same exclusive group as start_all: stopping cancels a start-all in progress.
+        self.run_worker(self.manager.stop_all(), group="bulk", exclusive=True)
+
+    def action_help(self) -> None:
+        """Show every key and mouse action (bound to '?')."""
+        self.push_screen(HelpScreen())
+
+    def action_follow_log(self) -> None:
+        """Jump to the newest output and keep following it (bound to 'G')."""
+        self._log_view.scroll_end(animate=False)
+
+    def action_clear_log(self) -> None:
+        """Clear the selected process's log (bound to 'c')."""
+        process = self._selected_process()
+        if process is not None:
+            process.output.clear()
+            self._refresh_log_pane()
 
     def _selected_process(self):
         """Return the `ManagedProcess` for the sidebar selection, if any."""
@@ -529,6 +701,75 @@ class DevpApp(App[None]):
         lines = text.count("\n") + 1
         summary = f"{lines} lines" if lines > 1 else f"{len(text)} characters"
         self.notify(f"Copied {summary}", severity="information", timeout=2)
+
+    def _show_config_warnings(self) -> None:
+        """Surface config version mismatches (see `check_versions`) as warning toasts."""
+        for warning in self.manager.config.warnings:
+            self.notify(escape(warning), title="Config version", severity="warning", timeout=20)
+
+    def _check_config(self) -> None:
+        """Offer to reload devp.toml when it's been saved with a meaningful change."""
+        if self._reloading or self._config_path is None:
+            return
+        stamp = _file_stamp(self._config_path)
+        if stamp is None or stamp == self._config_stamp:
+            return
+        self._config_stamp = stamp  # asked (or rejected) once per save
+        name = self._config_path.name
+        try:
+            config = load_config(self._config_path)
+        except ConfigError as exc:
+            self.notify(
+                f"{escape(str(exc))}\nStill running the previous config.",
+                title=f"{name} has an error",
+                severity="error",
+                timeout=10,
+            )
+            return
+        if config == self.manager.config:
+            return  # e.g. only comments or whitespace changed
+        running = [
+            process_name
+            for process_name, runnable in self.manager.processes.items()
+            if runnable.state in (ProcessState.STARTING, ProcessState.RUNNING)
+        ]
+
+        def on_answer(reload: bool | None) -> None:
+            if reload:
+                self.run_worker(self._reload(config), group="reload", exclusive=True)
+
+        self.push_screen(ReloadConfigScreen(name, running), on_answer)
+
+    async def _reload(self, config: Config) -> None:
+        """Stop everything, then rebuild the process list from `config` and autostart it."""
+        self._reloading = True
+        try:
+            self.notify("Reloading config: stopping everything", timeout=3)
+            if self._autostart is not None:
+                self._autostart.cancel()
+            self.workers.cancel_group(self, "bulk")
+            await self.manager.shutdown_all()
+
+            self._generation += 1
+            self.manager = ProcessManager(config)
+            self._wire(self.manager)
+            self._process_names = list(self.manager.processes)
+            if self.selected_name not in self.manager.processes:
+                self.selected_name = self._process_names[0] if self._process_names else None
+
+            sidebar = self.query_one("#sidebar", ListView)
+            await sidebar.clear()
+            await sidebar.extend(self._make_list_items())
+            if self.selected_name is not None:
+                sidebar.index = self._process_names.index(self.selected_name)
+            self._search_query = ""
+            self._refresh_log_pane()
+
+            self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+            self.notify("Config reloaded", severity="information", timeout=3)
+            self._show_config_warnings()
+        finally:
+            self._reloading = False
 
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""

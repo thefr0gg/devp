@@ -98,3 +98,62 @@ def test_version(capsys):
         main(["--version"])
     assert exc_info.value.code == 0
     assert capsys.readouterr().out.strip() == f"devp {__version__}"
+
+
+def test_init_records_the_devp_and_config_versions(tmp_path, monkeypatch):
+    from devp.config import CONFIG_VERSION
+
+    monkeypatch.chdir(tmp_path)
+    main(["init"])
+    config = load_config(tmp_path / "devp.toml")
+    assert config.devp_version == __version__
+    assert config.config_version == CONFIG_VERSION
+    assert config.warnings == []
+
+
+def test_upgrade_config_stamps_an_unversioned_file_and_keeps_its_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    original = "# my processes\n\n" + MINIMAL + "\n# trailing note\n"
+    (tmp_path / "devp.toml").write_text(original)
+    assert load_config(tmp_path / "devp.toml").warnings  # unversioned: warns
+
+    main(["upgrade-config"])
+
+    text = (tmp_path / "devp.toml").read_text()
+    assert text.startswith("# my processes\n")
+    assert MINIMAL in text and "# trailing note" in text
+    assert load_config(tmp_path / "devp.toml").warnings == []
+
+
+def test_upgrade_config_updates_an_existing_header_in_place(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("devp.config.CONFIG_VERSION", "1.1")
+    monkeypatch.setattr("devp.__main__.CONFIG_VERSION", "1.1")
+    (tmp_path / "devp.toml").write_text(
+        '[devp]\nversion = "0.0.1"  # keep this comment\nconfig-version = "1.0"\n\n' + MINIMAL
+    )
+    main(["upgrade-config"])
+    text = (tmp_path / "devp.toml").read_text()
+    assert f'version = "{__version__}"  # keep this comment' in text
+    assert 'config-version = "1.1"' in text
+    assert load_config(tmp_path / "devp.toml").warnings == []
+
+
+def test_upgrade_config_refuses_a_different_major_layout(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    original = '[devp]\nconfig-version = "9.0"\n\n' + MINIMAL
+    (tmp_path / "devp.toml").write_text(original)
+    with pytest.raises(SystemExit):
+        main(["upgrade-config"])
+    assert (tmp_path / "devp.toml").read_text() == original
+    err = " ".join(capsys.readouterr().err.replace("│", " ").split())  # unwrap the box
+    assert "can't read" in err
+
+
+def test_stamping_never_moves_top_level_keys_into_the_devp_table():
+    import tomllib
+
+    from devp.__main__ import stamp_versions
+
+    data = tomllib.loads(stamp_versions("top = 1\n" + MINIMAL))
+    assert data["top"] == 1 and "top" not in data["devp"]

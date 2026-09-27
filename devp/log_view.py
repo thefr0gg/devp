@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 
 from rich.cells import cell_len
@@ -17,7 +17,7 @@ from textual.scroll_view import ScrollView
 from textual.selection import Selection
 from textual.strip import Strip
 
-from devp.ansi import strip_ansi
+from devp.ansi import only_sgr, strip_ansi
 
 _sub_control = re.compile("[\u0000-\u001f\u007f]").sub
 
@@ -66,6 +66,9 @@ class LogView(ScrollView, can_focus=True):
         self._first_index = 0  # absolute index of self._lines[0]
         self._wrap_width = 0
         self._highlight = ""
+        # Raw text of the lines that contain escape codes, by absolute index, so their
+        # colors can be rendered; everything else works on the plain `_lines`.
+        self._ansi: dict[int, str] = {}
         # Per line: its wrapped rows, each with the character offset it starts at.
         self._row_cache: LRUCache[int, list[tuple[Strip, int]]] = LRUCache(1024)
         # Finished screen rows (cropped, tagged with selection offsets, styled), keyed by
@@ -81,6 +84,14 @@ class LogView(ScrollView, can_focus=True):
         return len(self._lines)
 
     @property
+    def lines_below(self) -> int:
+        """How many lines start below the visible area (0 when following the tail)."""
+        bottom = self.scroll_offset.y + self.scrollable_content_region.height
+        if bottom >= self._total_rows:
+            return 0
+        return len(self._lines) - bisect_left(self._row_starts, bottom)
+
+    @property
     def end_index(self) -> int:
         """Absolute index one past the last line."""
         return self._first_index + len(self._lines)
@@ -89,6 +100,7 @@ class LogView(ScrollView, can_focus=True):
         """Remove every line."""
         self._first_index += len(self._lines)
         self._lines.clear()
+        self._ansi.clear()
         self._row_starts.clear()
         self._total_rows = 0
         self._clear_caches()
@@ -101,7 +113,10 @@ class LogView(ScrollView, can_focus=True):
         width = self._wrap_width
         row_starts = self._row_starts
         total = self._total_rows
+        ansi = self._ansi
         for line in lines:
+            if "\x1b" in line:
+                ansi[self._first_index + len(self._lines)] = line
             line = _clean(line)
             self._lines.append(line)
             row_starts.append(total)
@@ -144,6 +159,13 @@ class LogView(ScrollView, can_focus=True):
         self._row_starts = [start - shift for start in self._row_starts[excess:]]
         self._total_rows -= shift
         self._first_index += excess
+        # Raw lines were added in index order, so the pruned ones are at the front.
+        ansi = self._ansi
+        while ansi:
+            oldest = next(iter(ansi))
+            if oldest >= self._first_index:
+                break
+            del ansi[oldest]
         # Keep the view on the same content rather than letting it drift by `shift` rows.
         if not self.is_vertical_scroll_end:
             self.scroll_to(y=max(0, self.scroll_y - shift), animate=False, immediate=True)
@@ -231,6 +253,21 @@ class LogView(ScrollView, can_focus=True):
             self._line_cache[key] = line
         return line
 
+    def _colored_text(self, index: int, line: str) -> Text:
+        """`line` with its original colors, decoded from the raw text only when drawn.
+
+        The decoded text must match the plain line exactly, since search, selection,
+        and wrapping all use the plain line's character offsets; anything unusual
+        (a stray carriage return, say) falls back to plain text.
+        """
+        raw = self._ansi.get(index)
+        if raw is not None:
+            text = Text.from_ansi(only_sgr(raw), end="")
+            text.expand_tabs()
+            if text.plain == line:
+                return text
+        return Text(line, end="")
+
     def _render_rows(self, i: int) -> list[tuple[Strip, int]]:
         index = self._first_index + i
         selection = self.text_selection
@@ -240,7 +277,7 @@ class LogView(ScrollView, can_focus=True):
             if cached is not None:
                 return cached
         line = self._lines[i]
-        text = Text(line, end="")
+        text = self._colored_text(index, line)
         if self._highlight and self._highlight in line.lower():
             text.stylize(self._match_style())
         if span is not None:

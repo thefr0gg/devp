@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 
 import pytest
@@ -28,6 +29,14 @@ def make_app(**process_kwargs) -> DevpApp:
         crons=[],
     )
     return DevpApp(ProcessManager(config))
+
+
+async def _wait_for(predicate, timeout=5.0):
+    for _ in range(int(timeout / 0.05)):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met in time")
 
 
 async def test_escape_closes_search_restores_focus_and_clears_text():
@@ -121,7 +130,7 @@ async def test_focused_pane_border_is_highlighted():
         await pilot.pause()
         assert log_pane.styles.border_top[1] == sidebar_focused_color
         assert sidebar.styles.border_top[1] != sidebar_focused_color
-        assert log_pane.border_title == "Logs · sleeper"
+        assert log_pane.border_title.startswith("Logs · sleeper")
 
 
 async def test_search_highlights_and_navigates_matches():
@@ -291,7 +300,7 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         processes=[
             ProcessConfig(
                 name="db",
-                command=python_command("import time; time.sleep(1.5); print('up'); time.sleep(30)"),
+                command=python_command("import time; time.sleep(3); print('up'); time.sleep(30)"),
                 ready_when="up",
             ),
             ProcessConfig(
@@ -312,11 +321,7 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         assert app.selected_name == "api"
         assert app.manager.processes["db"].state == ProcessState.STARTING
 
-        for _ in range(60):
-            if app.manager.processes["api"].state == ProcessState.RUNNING:
-                break
-            await asyncio.sleep(0.05)
-        assert app.manager.processes["api"].state == ProcessState.RUNNING
+        await _wait_for(lambda: app.manager.processes["api"].state == ProcessState.RUNNING, 10)
 
         await app.manager.shutdown_all()
 
@@ -353,3 +358,193 @@ async def test_base_background_is_the_terminal_default():
         painted = [bg for bg in cells if bg is not None and not bg.is_default]
         assert len(painted) <= 30  # just the (unfocused) selected sidebar row
         await app.manager.shutdown_all()
+
+
+def two_process_app() -> DevpApp:
+    config = Config(
+        processes=[
+            ProcessConfig(name="db", command=python_command("import time; time.sleep(30)")),
+            ProcessConfig(
+                name="api",
+                command=python_command("import time; time.sleep(30)"),
+                depends_on=["db"],
+                autostart=False,
+            ),
+        ],
+        crons=[],
+    )
+    return DevpApp(ProcessManager(config))
+
+
+async def test_start_all_and_stop_all():
+    app = two_process_app()
+    async with app.run_test() as pilot:
+        db, api = app.manager.processes["db"], app.manager.processes["api"]
+        await _wait_for(lambda: db.state == ProcessState.RUNNING)
+        assert api.state == ProcessState.STOPPED  # autostart = false
+
+        await pilot.press("S")
+        await _wait_for(lambda: api.state == ProcessState.RUNNING)
+
+        await pilot.press("X")
+        await _wait_for(
+            lambda: db.state == ProcessState.STOPPED and api.state == ProcessState.STOPPED
+        )
+        await app.manager.shutdown_all()
+
+
+async def test_clear_log_empties_the_selected_process_buffer():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        sleeper.log("old line")
+        log = app.query_one("#log")
+        await _wait_for(lambda: log.line_count == 1)
+
+        log.focus()  # c belongs to the log pane
+        await pilot.press("c")
+        await pilot.pause()
+        assert log.line_count == 0 and len(sleeper.output) == 0
+
+        sleeper.log("new line")  # later output still streams in
+        await _wait_for(lambda: log.find("new line"))
+        await app.manager.shutdown_all()
+
+
+async def test_log_title_shows_live_process_details():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        log_pane = app.query_one("#log-pane")
+        await _wait_for(lambda: f"pid {sleeper.pid}" in str(log_pane.border_title))
+        assert re.search(r"up \d+s", log_pane.border_title)
+        assert "restarts" not in log_pane.border_title
+
+        await sleeper.restart()
+        await _wait_for(lambda: "restarts 1" in str(log_pane.border_title))
+
+        await sleeper.stop()
+        await _wait_for(lambda: "pid" not in str(log_pane.border_title))
+        assert "exit" in log_pane.border_title
+        await app.manager.shutdown_all()
+
+
+async def test_more_lines_indicator_and_follow():
+    app = make_app()
+    async with app.run_test(size=(80, 16)) as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        for i in range(100):
+            sleeper.log(f"line {i}")
+        log = app.query_one("#log")
+        log_pane = app.query_one("#log-pane")
+        await _wait_for(lambda: log.line_count == 100)
+        await pilot.pause()
+        assert log.lines_below == 0 and not log_pane.border_subtitle  # following the tail
+
+        log.scroll_home(animate=False)
+        await _wait_for(lambda: "more lines" in str(log_pane.border_subtitle))
+        assert f"▼ {log.lines_below} more lines" in log_pane.border_subtitle
+
+        sleeper.log("new while scrolled up")  # doesn't yank the view back down
+        await pilot.pause()
+        assert log.scroll_y == 0
+
+        log.focus()  # G belongs to the log pane
+        await pilot.press("G")
+        await _wait_for(lambda: not log_pane.border_subtitle)
+        assert log.is_vertical_scroll_end
+
+        sleeper.log("followed again")  # following resumes
+        await _wait_for(lambda: log.find("followed again"))
+        await pilot.pause()
+        assert log.is_vertical_scroll_end
+        await app.manager.shutdown_all()
+
+
+async def test_help_screen_opens_and_closes():
+    from devp.screens import HelpScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+        await app.manager.shutdown_all()
+
+
+def footer_keys(app) -> set[str]:
+    """The keys the footer shows right now (enabled, visible bindings)."""
+    return {
+        key
+        for key, active in app.screen.active_bindings.items()
+        if active.binding.show and active.enabled
+    }
+
+
+async def test_footer_shows_only_the_keys_that_work_where_focus_is():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        processes = {"s", "x", "r", "S", "X", "slash", "question_mark", "q"}
+        assert footer_keys(app) == processes
+
+        app.query_one("#log").focus()
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "question_mark", "q"}
+
+        await pilot.press("slash")
+        await pilot.pause()
+        assert footer_keys(app) == {"enter", "escape"}  # typing into the search bar
+        assert app.screen.active_bindings["escape"].binding.description == "Cancel"
+
+        await pilot.press(*"zzz", "enter")  # run a search; focus returns to the log
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "n", "N", "escape", "question_mark", "q"}
+        assert app.screen.active_bindings["escape"].binding.description == "End search"
+
+        await pilot.press("escape")  # clear the search: n / N / Esc go away again
+        await pilot.pause()
+        assert footer_keys(app) == {"slash", "G", "c", "question_mark", "q"}
+
+        app.query_one("#sidebar").focus()
+        await pilot.pause()
+        assert footer_keys(app) == processes
+        await app.manager.shutdown_all()
+
+
+async def test_process_keys_do_nothing_outside_the_process_list():
+    app = make_app(autostart=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        app.query_one("#log").focus()
+        await pilot.pause()
+        await pilot.press("s")
+        await asyncio.sleep(0.3)
+        assert sleeper.state == ProcessState.STOPPED
+
+        app.query_one("#sidebar").focus()
+        await pilot.pause()
+        await pilot.press("s")
+        await _wait_for(lambda: sleeper.state == ProcessState.RUNNING)
+        await app.manager.shutdown_all()
+
+
+async def test_config_version_warnings_are_shown_as_toasts():
+    config = Config(
+        processes=[ProcessConfig(name="api", command=python_command("pass"), autostart=False)],
+        crons=[],
+        warnings=["devp.toml doesn't record a config-version"],
+    )
+    app = DevpApp(ProcessManager(config))
+    async with app.run_test(notifications=True) as pilot:
+        await pilot.pause()
+        [toast] = [n for n in app._notifications if n.title == "Config version"]
+        assert toast.severity == "warning" and "config-version" in toast.message

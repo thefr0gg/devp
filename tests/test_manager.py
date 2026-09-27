@@ -205,3 +205,41 @@ async def test_dependents_are_not_started_when_a_dependency_never_becomes_ready(
     assert any("not started" in line for line in api.output)
 
     await manager.shutdown_all()
+
+
+async def test_concurrent_starts_spawn_only_once(monkeypatch):
+    import asyncio
+
+    spawned = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def counting_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", counting_exec)
+    proc = ManagedProcess(
+        ProcessConfig(name="api", command=python_command("import time; time.sleep(30)"))
+    )
+    await asyncio.gather(proc.start(), proc.start(), proc.start())
+    assert len(spawned) == 1 and proc.state == ProcessState.RUNNING
+    await proc.stop()
+
+
+async def test_stop_all_pauses_cron_schedules_and_start_all_resumes_them():
+    config = Config(
+        processes=[],
+        crons=[CronConfig(name="backup", command=python_command("pass"), schedule="0 0 1 1 *")],
+    )
+    manager = ProcessManager(config)
+    manager.build()
+    job = manager.processes["backup"]
+    await manager.autostart()
+    assert job.state == ProcessState.SCHEDULED
+
+    await manager.stop_all()
+    assert job.state == ProcessState.STOPPED
+
+    await manager.start_all()
+    assert job.state == ProcessState.SCHEDULED
+    await manager.shutdown_all()
