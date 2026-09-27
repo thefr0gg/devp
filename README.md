@@ -154,14 +154,15 @@ skipped — runs never overlap.
 | `Esc`          | Close the search bar and clear highlighting                    |
 | `q` / `Ctrl+C` | Quit devp (stops every running process and cron schedule first) |
 
-Each item in the sidebar shows a status glyph:
+Each item in the sidebar shows a status glyph. They're plain braille/text
+characters (not emoji), so they line up in any terminal font; active states animate:
 
-- `●` green — running
-- `○` grey — stopped
-- `○` yellow — stopping
-- `✕` red — crashed or failed to start
-- `↻` cyan — a cron job, enabled and waiting for its next run (shown with a live
-  countdown that ticks down every second, e.g. `↻ backup (next in 5m12s)`)
+- `⠋` green spinner — running
+- `⠶` grey — stopped
+- `⠋` yellow spinner — stopping
+- `✗` red — crashed or failed to start
+- `⠁` cyan orbiting dot — a cron job, enabled and waiting for its next run (shown
+  with a live countdown that ticks down every second, e.g. `⠁ backup (next in 5m12s)`)
 
 Pressing `s` on a cron job triggers an immediate one-off run, independent of its
 schedule — handy for testing a job without waiting for it to come due.

@@ -15,9 +15,10 @@ from devp.log_view import LogView
 from devp.manager import ProcessManager
 from devp.messages import ProcessError, ProcessStateChanged
 from devp.process import MAX_BUFFER_LINES, ProcessState
-from devp.widgets import format_duration, status_label
+from devp.widgets import format_duration, is_animated, status_label
 
-_CRON_TICK_INTERVAL = 1.0
+# How often animated sidebar glyphs advance a frame (also ticks cron countdowns).
+_GLYPH_FRAME_INTERVAL = 0.1
 # Output is buffered and written to the log pane in batches at most this often, so a
 # chatty process costs one render per frame instead of one message + render per line.
 _LOG_FLUSH_INTERVAL = 1 / 30
@@ -44,9 +45,9 @@ class ProcessListItem(ListItem):
         super().__init__(self.label)
         self.process_name = process_name
 
-    def set_status(self, state: ProcessState, detail: str | None = None) -> None:
+    def set_status(self, state: ProcessState, detail: str | None = None, frame: int = 0) -> None:
         """Update the row's label, skipping the refresh when nothing visible changed."""
-        text = status_label(self.process_name, state, detail)
+        text = status_label(self.process_name, state, detail, frame)
         if text != self.label_text:
             self.label_text = text
             self.label.update(text)
@@ -150,6 +151,7 @@ class DevpApp(App[None]):
         self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
         self._pending_lines: list[str] = []
+        self._glyph_frame = 0
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
 
@@ -175,15 +177,21 @@ class DevpApp(App[None]):
         sidebar.border_title = "Processes"
         sidebar.focus()
         self._refresh_log_pane()
-        self.set_interval(_CRON_TICK_INTERVAL, self._tick_cron_labels)
+        self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
         await self.manager.autostart()
 
-    def _tick_cron_labels(self) -> None:
-        """Refresh every cron job's sidebar label so its 'next run' countdown ticks live."""
+    def _tick_sidebar(self) -> None:
+        """Advance animated status glyphs and keep cron 'next run' countdowns live.
+
+        Only rows whose glyph animates, or that show a countdown, are recomputed, and
+        `set_status` skips the redraw when the label text hasn't changed.
+        """
+        self._glyph_frame += 1
         for name, item in self._list_items.items():
             runnable = self.manager.processes[name]
-            if isinstance(runnable, CronJob):
-                item.set_status(runnable.state, _status_detail(runnable))
+            state = runnable.state
+            if is_animated(state) or isinstance(runnable, CronJob):
+                item.set_status(state, _status_detail(runnable), self._glyph_frame)
 
     def _on_output(self, process_name: str, line: str) -> None:
         """Queue a line of the selected process's output for the next batched log write.
@@ -225,7 +233,7 @@ class DevpApp(App[None]):
         if item is not None:
             runnable = self.manager.processes.get(message.process_name)
             detail = _status_detail(runnable) if runnable is not None else None
-            item.set_status(message.state, detail)
+            item.set_status(message.state, detail, self._glyph_frame)
 
         name = escape(message.process_name)
         if message.state == ProcessState.RUNNING:

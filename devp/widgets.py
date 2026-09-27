@@ -6,18 +6,32 @@ from rich.markup import escape
 
 from devp.process import ProcessState
 
+# Braille-based glyphs: they render as plain monospace text in any terminal font,
+# unlike symbols such as ● or ✕ that many fonts draw as (wide, colored) emoji.
+# Active states cycle through frames; `frame` is a free-running counter.
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_ORBIT = "⠁⠈⠐⠠⢀⡀⠄⠂"
+
 _GLYPHS: dict[ProcessState, tuple[str, str]] = {
-    ProcessState.RUNNING: ("●", "green"),
-    ProcessState.STOPPED: ("○", "grey50"),
-    ProcessState.STOPPING: ("○", "yellow"),
-    ProcessState.CRASHED: ("✕", "red"),
-    ProcessState.SCHEDULED: ("↻", "cyan"),
+    ProcessState.RUNNING: (_SPINNER, "green"),
+    ProcessState.STOPPED: ("⠶", "grey50"),
+    ProcessState.STOPPING: (_SPINNER, "yellow"),
+    ProcessState.CRASHED: ("✗", "red"),
+    ProcessState.SCHEDULED: (_ORBIT, "cyan"),
 }
 
 
-def status_label(name: str, state: ProcessState, detail: str | None = None) -> str:
+def is_animated(state: ProcessState) -> bool:
+    """Whether `state`'s glyph cycles through frames (and so needs periodic redraws)."""
+    return len(_GLYPHS[state][0]) > 1
+
+
+def status_label(
+    name: str, state: ProcessState, detail: str | None = None, frame: int = 0
+) -> str:
     """Build the Rich-markup sidebar label: a colored glyph, the name, and an optional detail."""
-    glyph, color = _GLYPHS[state]
+    frames, color = _GLYPHS[state]
+    glyph = frames[frame % len(frames)]
     label = f"[{color}]{glyph}[/{color}] {escape(name)}"
     if detail:
         label += f" [dim]({escape(detail)})[/dim]"

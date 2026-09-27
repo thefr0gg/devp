@@ -174,3 +174,16 @@ async def test_output_of_unselected_processes_is_not_written_to_the_log():
         assert log.line_count == 1 and log.find("from b")
 
         await app.manager.shutdown_all()
+
+
+async def test_running_process_glyph_animates():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        item = app._list_items["sleeper"]
+        await asyncio.sleep(0.15)
+        first = item.label_text
+        await asyncio.sleep(0.25)
+        assert item.label_text != first
+
+        await app.manager.shutdown_all()
