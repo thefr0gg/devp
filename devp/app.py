@@ -8,6 +8,7 @@ from functools import partial
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.color import Color
 from textual.containers import Horizontal, Vertical
 from textual.events import Click, Resize
 from textual.message import Message
@@ -234,6 +235,7 @@ class DevpApp(App[None]):
 
     async def on_mount(self) -> None:
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
+        self._set_terminal_background()
         self.query_one("#search-input", Input).display = False
         sidebar = self.query_one("#sidebar", ListView)
         sidebar.border_title = "Processes"
@@ -242,6 +244,23 @@ class DevpApp(App[None]):
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+
+    def _set_terminal_background(self) -> None:
+        """Make the terminal's default background the theme's, until devp exits.
+
+        Terminals such as Windows Terminal pad the character grid with a margin the app
+        can't draw in; it's filled with the terminal's own background, which shows as
+        a black frame around the theme's background. OSC 11 changes that default
+        background (and so the padding); terminals that don't support it ignore it.
+        """
+        if self._driver is not None:
+            r, g, b = Color.parse(self.theme_variables["background"]).rgb
+            self._driver.write(f"\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x07")
+
+    def on_unmount(self) -> None:
+        # Runs on every exit path, while the terminal is still ours: undo OSC 11 (OSC 111).
+        if self._driver is not None:
+            self._driver.write("\x1b]111\x07")
 
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.

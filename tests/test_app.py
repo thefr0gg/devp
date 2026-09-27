@@ -319,3 +319,17 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         assert app.manager.processes["api"].state == ProcessState.RUNNING
 
         await app.manager.shutdown_all()
+
+
+async def test_terminal_background_matches_theme_while_running(monkeypatch):
+    written: list[str] = []
+    monkeypatch.setattr(
+        "textual.drivers.headless_driver.HeadlessDriver.write",
+        lambda self, data: written.append(data),
+    )
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "\x1b]11;rgb:19/17/24\x07" in written  # Rosé Pine base
+        await app.manager.shutdown_all()
+    assert written[-1] == "\x1b]111\x07"  # restored on exit
