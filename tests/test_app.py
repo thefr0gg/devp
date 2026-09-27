@@ -460,3 +460,23 @@ async def test_more_lines_indicator_and_follow():
         await pilot.pause()
         assert log.is_vertical_scroll_end
         await app.manager.shutdown_all()
+
+
+async def test_help_screen_opens_and_closes_and_footer_is_trimmed():
+    from devp.screens import HelpScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        from textual.binding import Binding
+
+        shown = {b.key for b in Binding.make_bindings(app.BINDINGS) if b.show}
+        assert shown == {"s", "x", "r", "slash", "question_mark", "q"}
+
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpScreen)
+        await app.manager.shutdown_all()

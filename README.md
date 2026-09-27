@@ -221,11 +221,15 @@ skipped — runs never overlap.
 | `r`            | Restart the selected process/cron job (stop, then run again)    |
 | `S` / `X`      | Start / stop everything (in `depends_on` order; pauses and resumes cron schedules) |
 | `c`            | Clear the selected process's log                               |
+| `G`            | Jump to the newest output and follow it again                  |
+| `?`            | Show every key and mouse action                                |
 | `/`            | Search the selected process's log                              |
 | `n` / `N`      | Jump to the next / previous search match                       |
 | `Esc`          | Close the search bar and clear highlighting                    |
 | `Ctrl+C`       | Copy the selected log text; with nothing selected, quit        |
 | `q`            | Quit devp (stops every running process and cron schedule first) |
+
+The footer shows only the everyday keys; press `?` for the full list.
 
 With the mouse, click a process to select it, and **double-click** it to run it
 (the same as pressing `s`).

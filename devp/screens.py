@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from rich.markup import escape
+from rich.table import Table
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Label
+from textual.widgets import Button, Label, Static
 
 
 class ReloadConfigScreen(ModalScreen[bool]):
@@ -87,3 +89,94 @@ class ReloadConfigScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+HELP_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "Processes",
+        [
+            ("↑ / ↓", "Select a process"),
+            ("s", "Run the selected process (a cron job runs now)"),
+            ("x", "Stop the selected process"),
+            ("r", "Restart the selected process"),
+            ("S / X", "Start / stop everything, in depends_on order"),
+            ("double-click", "Run the clicked process"),
+        ],
+    ),
+    (
+        "Logs",
+        [
+            ("Tab", "Move focus between the sidebar and the log"),
+            ("PgUp / PgDn", "Scroll the log (Home / End in the log too)"),
+            ("G", "Jump to the newest output and follow it"),
+            ("c", "Clear the selected process's log"),
+            ("drag", "Select log text with the mouse"),
+            ("Ctrl+C", "Copy the selection (quits when nothing is selected)"),
+        ],
+    ),
+    (
+        "Search",
+        [
+            ("/", "Search the selected process's log"),
+            ("n / N", "Next / previous match"),
+            ("Esc", "Close the search and clear highlighting"),
+        ],
+    ),
+    (
+        "General",
+        [
+            ("?", "Show or hide this help"),
+            ("q", "Quit (stops every process first)"),
+        ],
+    ),
+]
+
+
+class HelpScreen(ModalScreen[None]):
+    """Every key and mouse action, grouped by what it acts on."""
+
+    DEFAULT_CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+    #help-dialog {
+        width: 68;
+        max-width: 100%;
+        height: auto;
+        max-height: 100%;
+        padding: 0 2;
+        background: $surface;
+        color: $foreground;
+        border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
+        border-subtitle-color: $text-muted;
+    }
+    #help-dialog Static {
+        width: 100%;
+    }
+    """
+
+    BINDINGS = [Binding("escape,question_mark,q", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="help-dialog") as dialog:
+            dialog.border_title = "devp keys"
+            dialog.border_subtitle = "? / Esc to close"
+            yield Static(self._render_help())
+
+    def _render_help(self) -> Table:
+        accent = f"bold {self.app.theme_variables['accent']}"
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style="bold", no_wrap=True)
+        table.add_column()
+        for index, (section, keys) in enumerate(HELP_SECTIONS):
+            if index:
+                table.add_row("", "")
+            table.add_row(Text(section, style=accent), "")
+            for key, description in keys:
+                table.add_row(Text(key, style="bold"), description)
+        return table
+
+    def action_close(self) -> None:
+        self.dismiss()

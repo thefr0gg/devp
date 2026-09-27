@@ -23,6 +23,7 @@ from devp.log_view import LogView
 from devp.manager import ProcessManager
 from devp.messages import ProcessError, ProcessStateChanged
 from devp.process import MAX_BUFFER_LINES, ProcessState
+from devp.screens import HelpScreen
 from devp.widgets import format_duration, is_animated, status_label
 
 # How often animated sidebar glyphs advance a frame (also ticks cron countdowns).
@@ -200,19 +201,22 @@ class DevpApp(App[None]):
 
     ENABLE_COMMAND_PALETTE = False
 
+    # Only the everyday keys are shown in the footer (so it fits narrow windows);
+    # `?` opens a help screen listing everything.
     BINDINGS = [
         ("s", "start_selected", "Run"),
         ("x", "stop_selected", "Stop"),
         ("r", "restart_selected", "Restart"),
-        ("S", "start_all", "Run all"),
-        ("X", "stop_all", "Stop all"),
-        ("c", "clear_log", "Clear log"),
-        ("G", "follow_log", "Follow"),
         ("slash", "search", "Search"),
-        ("n", "next_match", "Next match"),
-        ("N", "prev_match", "Prev match"),
-        ("escape", "close_search", "Close search"),
+        ("question_mark", "help", "Help"),
         ("q", "quit", "Quit"),
+        Binding("S", "start_all", "Run all", show=False),
+        Binding("X", "stop_all", "Stop all", show=False),
+        Binding("c", "clear_log", "Clear log", show=False),
+        Binding("G", "follow_log", "Follow", show=False),
+        Binding("n", "next_match", "Next match", show=False),
+        Binding("N", "prev_match", "Prev match", show=False),
+        Binding("escape", "close_search", "Close search", show=False),
         # Priority, so it wins over the screen's own silent copy binding.
         Binding("ctrl+c", "copy_or_quit", "Copy / Quit", show=False, priority=True),
     ]
@@ -552,6 +556,10 @@ class DevpApp(App[None]):
         self.notify("Stopping everything", severity="information", timeout=2)
         # Same exclusive group as start_all: stopping cancels a start-all in progress.
         self.run_worker(self.manager.stop_all(), group="bulk", exclusive=True)
+
+    def action_help(self) -> None:
+        """Show every key and mouse action (bound to '?')."""
+        self.push_screen(HelpScreen())
 
     def action_follow_log(self) -> None:
         """Jump to the newest output and keep following it (bound to 'G')."""
