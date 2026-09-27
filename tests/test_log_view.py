@@ -120,3 +120,35 @@ async def test_selected_text_keeps_its_own_color():
         selected = next(seg for seg in log.render_line(0) if seg.text.startswith("hello"))
         assert selected.style.bgcolor is not None
         assert selected.style.color != selected.style.bgcolor  # text stays readable
+
+
+async def test_ansi_colors_are_rendered_while_text_stays_plain():
+    app = LogApp()
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        log.write_lines(["\x1b]0;title\x07\x1b[31mERROR\x1b[0m\tdisk full", "plain line"])
+        await pilot.pause()
+
+        assert log.find("error\tdisk") == []  # tabs are expanded in the plain text
+        assert log.find("ERROR   disk full") == [0]
+        segments = {seg.text: seg.style for seg in log.render_line(0) if seg.text.strip()}
+        assert segments["ERROR"].color.number == 1  # ANSI red, from the terminal palette
+        assert segments["   disk full"].color != segments["ERROR"].color  # reset after ERROR
+
+        from textual.geometry import Offset
+        from textual.selection import Selection
+
+        # Offsets are on the plain text: selecting "disk" copies "disk".
+        assert log.get_selection(Selection(Offset(8, 0), Offset(12, 0)))[0] == "disk"
+
+
+async def test_raw_colored_lines_are_pruned_with_the_buffer():
+    app = LogApp(max_lines=3)
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        log.write_lines(f"\x1b[32mline {i}\x1b[0m" for i in range(10))
+        assert sorted(log._ansi) == [7, 8, 9]
+        log.clear()
+        assert log._ansi == {}

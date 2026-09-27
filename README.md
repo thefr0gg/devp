@@ -274,7 +274,8 @@ where one is installed, your system's clipboard tool (`pbcopy`, `clip`, `wl-copy
 ### Process output
 
 Selecting a process shows its full scrollback in the log pane on the right, and new
-output keeps streaming in live. If a process crashes or fails to start, you'll see
+output keeps streaming in live, in the colors the process printed it with (color
+codes are shown as colors; search and copy work on the plain text). If a process crashes or fails to start, you'll see
 an error toast explaining why, in addition to the sidebar turning red.
 
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
