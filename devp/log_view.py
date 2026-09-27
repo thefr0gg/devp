@@ -12,14 +12,14 @@ from rich.style import Style
 from rich.text import Text
 from textual.cache import LRUCache
 from textual.events import Resize
-from textual.geometry import Size
+from textual.geometry import Offset, Size
 from textual.scroll_view import ScrollView
+from textual.selection import Selection
 from textual.strip import Strip
 
 # ANSI escape sequences (colors, cursor movement, window titles) that processes print.
 _sub_ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])").sub
 _sub_control = re.compile("[\u0000-\u001f\u007f]").sub
-_MATCH_STYLE = Style.parse("black on yellow")
 
 
 def _clean(line: str) -> str:
@@ -44,7 +44,13 @@ class LogView(ScrollView, can_focus=True):
 
     Lines are addressed by an absolute index that stays stable as old lines are pruned
     from the front, so callers can hold on to it (e.g. for search navigation).
+
+    Supports mouse text selection: each rendered row is tagged with its line's absolute
+    index and the character offset it starts at, so a selection maps back to the
+    original (unwrapped) text and stays on the same content as the log scrolls.
     """
+
+    ALLOW_SELECT = True
 
     DEFAULT_CSS = """
     LogView {
@@ -62,7 +68,15 @@ class LogView(ScrollView, can_focus=True):
         self._first_index = 0  # absolute index of self._lines[0]
         self._wrap_width = 0
         self._highlight = ""
-        self._row_cache: LRUCache[int, list[Strip]] = LRUCache(1024)
+        # Per line: its wrapped rows, each with the character offset it starts at.
+        self._row_cache: LRUCache[int, list[tuple[Strip, int]]] = LRUCache(1024)
+        # Finished screen rows (cropped, tagged with selection offsets, styled), keyed by
+        # (line index, wrapped row, width); tagging is costly enough to be worth caching.
+        self._line_cache: LRUCache[tuple[int, int, int], Strip] = LRUCache(1024)
+
+    def _clear_caches(self) -> None:
+        self._row_cache.clear()
+        self._line_cache.clear()
 
     @property
     def line_count(self) -> int:
@@ -79,7 +93,7 @@ class LogView(ScrollView, can_focus=True):
         self._lines.clear()
         self._row_starts.clear()
         self._total_rows = 0
-        self._row_cache.clear()
+        self._clear_caches()
         self._update_virtual_size()
         self.scroll_home(animate=False, immediate=True)
 
@@ -106,7 +120,7 @@ class LogView(ScrollView, can_focus=True):
         query = query.lower()
         if query != self._highlight:
             self._highlight = query
-            self._row_cache.clear()
+            self._clear_caches()
             self.refresh()
 
     def find(self, query: str) -> list[int]:
@@ -154,7 +168,7 @@ class LogView(ScrollView, can_focus=True):
             return
         was_at_end = self.is_vertical_scroll_end
         self._wrap_width = width
-        self._row_cache.clear()
+        self._clear_caches()
         total = 0
         row_starts = self._row_starts
         for i, line in enumerate(self._lines):
@@ -167,7 +181,30 @@ class LogView(ScrollView, can_focus=True):
 
     def notify_style_update(self) -> None:
         super().notify_style_update()
-        self._row_cache.clear()
+        self._clear_caches()
+
+    def _match_style(self) -> Style:
+        """Search-match highlight in the current theme's colors (dark text on warning)."""
+        variables = self.app.theme_variables
+        return Style(color=variables["background"], bgcolor=variables["warning"])
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The selected text; selection offsets use absolute line indices."""
+        if not self._lines:
+            return None
+        first = self._first_index
+
+        def to_local(offset: Offset | None) -> Offset | None:
+            # Lines pruned since the selection began are gone; start from the oldest kept.
+            if offset is None or offset.y >= first:
+                return None if offset is None else Offset(offset.x, offset.y - first)
+            return Offset(0, 0)
+
+        local = Selection(to_local(selection.start), to_local(selection.end))
+        return local.extract("\n".join(self._lines)), "\n"
+
+    def selection_updated(self, selection: Selection | None) -> None:
+        self.refresh()
 
     def render_line(self, y: int) -> Strip:
         width = self.size.width
@@ -176,23 +213,60 @@ class LogView(ScrollView, can_focus=True):
         if row >= self._total_rows or not self._lines:
             return Strip.blank(width, rich_style)
         i = bisect_right(self._row_starts, row) - 1
-        rows = self._render_rows(i)
+        index = self._first_index + i
         sub = row - self._row_starts[i]
-        strip = rows[sub] if sub < len(rows) else Strip.blank(width, rich_style)
-        return strip.crop_extend(0, width, rich_style).apply_style(rich_style)
-
-    def _render_rows(self, i: int) -> list[Strip]:
-        key = self._first_index + i
-        cached = self._row_cache.get(key)
-        if cached is not None:
+        selection = self.text_selection
+        selected = selection is not None and selection.get_span(index) is not None
+        key = (index, sub, width)
+        if not selected and (cached := self._line_cache.get(key)) is not None:
             return cached
+        rows = self._render_rows(i)
+        if sub >= len(rows):
+            return Strip.blank(width, rich_style)
+        strip, char_start = rows[sub]
+        line = (
+            strip.crop_extend(0, width, rich_style)
+            .apply_offsets(char_start, index)
+            .apply_style(rich_style)
+        )
+        if not selected:
+            self._line_cache[key] = line
+        return line
+
+    def _render_rows(self, i: int) -> list[tuple[Strip, int]]:
+        index = self._first_index + i
+        selection = self.text_selection
+        span = selection.get_span(index) if selection is not None else None
+        if span is None:
+            cached = self._row_cache.get(index)
+            if cached is not None:
+                return cached
         line = self._lines[i]
         text = Text(line, end="")
         if self._highlight and self._highlight in line.lower():
-            text.stylize(_MATCH_STYLE)
+            text.stylize(self._match_style())
+        if span is not None:
+            start, end = span
+            # Only take the selection background: the theme's selection foreground is
+            # transparent, which a Rich style resolves to the background (hiding text).
+            selection_style = self.screen.get_component_rich_style("screen--selection")
+            text.stylize(
+                Style(bgcolor=selection_style.bgcolor),
+                start,
+                len(line) if end == -1 else end,
+            )
         console = self.app.console
-        rows = [Strip(row.render(console), row.cell_len) for row in _wrap(text, self._wrap_width)]
-        self._row_cache[key] = rows
+        rows: list[tuple[Strip, int]] = []
+        char_start = 0
+        for row in _wrap(text, self._wrap_width):
+            # Wrapping can drop the whitespace at a break, so locate each row in the line.
+            found = line.find(row.plain, char_start) if row.plain else -1
+            if found >= 0:
+                char_start = found
+            rows.append((Strip(row.render(console), row.cell_len), char_start))
+            char_start += len(row.plain)
+        if span is None:
+            self._row_cache[index] = rows
         return rows
 
 

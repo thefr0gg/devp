@@ -12,12 +12,13 @@ from devp.process import ProcessState
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _ORBIT = "⠁⠈⠐⠠⢀⡀⠄⠂"
 
+# Colors are theme variables, so the glyphs follow the app theme (Rosé Pine).
 _GLYPHS: dict[ProcessState, tuple[str, str]] = {
-    ProcessState.RUNNING: (_SPINNER, "green"),
-    ProcessState.STOPPED: ("⠶", "grey50"),
-    ProcessState.STOPPING: (_SPINNER, "yellow"),
-    ProcessState.CRASHED: ("✗", "red"),
-    ProcessState.SCHEDULED: (_ORBIT, "cyan"),
+    ProcessState.RUNNING: (_SPINNER, "$success"),
+    ProcessState.STOPPED: ("⠶", "$foreground 45%"),  # solid muted ($text-muted is translucent)
+    ProcessState.STOPPING: (_SPINNER, "$warning"),
+    ProcessState.CRASHED: ("✗", "$error"),
+    ProcessState.SCHEDULED: (_ORBIT, "$primary"),
 }
 
 
@@ -29,10 +30,10 @@ def is_animated(state: ProcessState) -> bool:
 def status_label(
     name: str, state: ProcessState, detail: str | None = None, frame: int = 0
 ) -> str:
-    """Build the Rich-markup sidebar label: a colored glyph, the name, and an optional detail."""
+    """Build the sidebar label's markup: a colored glyph, the name, and an optional detail."""
     frames, color = _GLYPHS[state]
     glyph = frames[frame % len(frames)]
-    label = f"[{color}]{glyph}[/{color}] {escape(name)}"
+    label = f"[{color}]{glyph}[/] {escape(name)}"
     if detail:
         label += f" [dim]({escape(detail)})[/dim]"
     return label

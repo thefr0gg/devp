@@ -187,3 +187,100 @@ async def test_running_process_glyph_animates():
         assert item.label_text != first
 
         await app.manager.shutdown_all()
+
+
+async def test_toasts_that_do_not_fit_the_window_are_dropped_oldest_first():
+    app = make_app()
+    async with app.run_test(size=(80, 16), notifications=True) as pilot:
+        await pilot.pause()
+        app.clear_notifications()
+        for i in range(10):
+            app.notify(f"note {i}", timeout=30)
+        await pilot.pause()
+        messages = [n.message for n in app._notifications]
+        assert 1 <= len(messages) < 10
+        assert messages[-1] == "note 9"
+        for toast in app.screen.query("Toast"):
+            assert toast.region.y >= 1  # nothing pushed above the top of the log pane
+
+        await app.manager.shutdown_all()
+
+
+async def test_toasts_move_above_the_search_bar_while_it_is_open():
+    app = make_app()
+    async with app.run_test(notifications=True) as pilot:
+        await pilot.pause()
+        rack = app.screen.query_one("ToastRack")
+        assert rack.styles.margin.bottom == 2
+        await pilot.press("slash")
+        await pilot.pause()
+        assert rack.styles.margin.bottom == 5
+        await pilot.press("escape")
+        await pilot.pause()
+        assert rack.styles.margin.bottom == 2
+
+        await app.manager.shutdown_all()
+
+
+async def test_double_clicking_a_stopped_process_starts_it():
+    app = make_app(autostart=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        assert sleeper.state == ProcessState.STOPPED
+
+        await pilot.click(app._list_items["sleeper"], times=2)
+        await asyncio.sleep(0.3)
+        assert sleeper.state == ProcessState.RUNNING
+
+        await app.manager.shutdown_all()
+
+
+async def test_single_click_does_not_start_a_process():
+    app = make_app(autostart=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.click(app._list_items["sleeper"])
+        await asyncio.sleep(0.3)
+        assert app.manager.processes["sleeper"].state == ProcessState.STOPPED
+
+
+async def test_ctrl_c_copies_selected_log_text_instead_of_quitting(monkeypatch):
+    from textual.geometry import Offset
+    from textual.selection import Selection
+
+    monkeypatch.setattr("devp.app.copy_native", lambda text: True)
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.manager.processes["sleeper"].log("hello world")
+        await asyncio.sleep(0.1)
+        log = app.query_one("#log")
+        app.screen.selections = {log: Selection(Offset(0, 0), Offset(5, 0))}
+        await pilot.pause()
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.clipboard == "hello"
+        assert app.is_running
+        assert not app.screen.selections
+
+        await app.manager.shutdown_all()
+
+
+async def test_ctrl_c_quits_when_nothing_is_selected():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await asyncio.sleep(0.5)
+        assert not app.is_running
+        assert app.manager.processes["sleeper"].state == ProcessState.STOPPED
+
+
+async def test_uses_the_rose_pine_theme():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "rose-pine"
+        await app.manager.shutdown_all()
