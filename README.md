@@ -87,8 +87,9 @@ autorestart = true
 ```
 
 Restarts back off exponentially on repeated crashes (1s, 2s, 4s, ... capped at 30s),
-resetting once the process runs to a clean exit, so a persistently broken command
-doesn't spin in a tight loop. Pressing `x` to stop it cancels any restart that's
+so a persistently broken command doesn't spin in a tight loop. The backoff starts
+over after a clean exit, or when a crash comes after at least 30s of uptime — a
+process that crashes once an hour is restarted after 1s, not 30s. Pressing `x` to stop it cancels any restart that's
 pending, so a deliberate stop always sticks.
 
 ### Ordering startup and shutdown with `depends_on`
@@ -232,9 +233,6 @@ The codebase is small and split by responsibility:
   never arrive. Even with a console, `CTRL_BREAK_EVENT` only works for processes
   that handle it (Python, Node, and most console apps do); an unresponsive process
   still gets a hard kill once the stop timeout elapses.
-- `autorestart`'s crash-loop backoff resets only on a clean exit, not after a
-  crashy process has simply stayed up for a while — a process crashing once an hour
-  will still see its backoff climb toward the 30s cap over time.
 - Log search/filtering across multiple processes at once isn't supported — search
   always applies to whichever process's log is currently selected.
 

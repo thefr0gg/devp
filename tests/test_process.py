@@ -203,3 +203,37 @@ async def test_windows_without_console_kills_immediately_without_waiting_out_the
 
     assert proc.state == ProcessState.STOPPED
     assert elapsed < 2.0  # should hard-kill immediately, not wait out the timeout
+
+
+async def test_crash_after_stable_uptime_resets_backoff(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 60.0)
+    monkeypatch.setattr(process_module, "STABLE_UPTIME", 0.3)
+    config = ProcessConfig(
+        name="flaky",
+        command=python_command("import sys, time; time.sleep(0.5); sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+    proc._crash_count = 5  # pretend it has been crash-looping
+
+    await proc.start()
+    await proc._wait_task
+    assert proc._crash_count == 1  # it ran longer than STABLE_UPTIME: backoff starts over
+    await proc.stop()
+
+
+async def test_quick_crashes_keep_escalating_backoff(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 60.0)
+    monkeypatch.setattr(process_module, "STABLE_UPTIME", 30.0)
+    config = ProcessConfig(
+        name="crashloop",
+        command=python_command("import sys; sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+    proc._crash_count = 5
+
+    await proc.start()
+    await proc._wait_task
+    assert proc._crash_count == 6
+    await proc.stop()

@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections import deque
 from collections.abc import Callable
 from enum import Enum, auto
@@ -18,6 +19,9 @@ MAX_BUFFER_LINES = 5000
 _STOP_TIMEOUT = 5.0
 _BASE_RESTART_DELAY = 1.0
 _MAX_RESTART_DELAY = 30.0
+# A crash after at least this much uptime starts the autorestart backoff over, so a
+# process that crashes once in a long while isn't treated like a crash loop.
+STABLE_UPTIME = 30.0
 
 OutputCallback = Callable[[str, str], None]
 StateCallback = Callable[[str, "ProcessState"], None]
@@ -71,6 +75,7 @@ class ManagedProcess:
         self._wait_task: asyncio.Task[None] | None = None
         self._restart_task: asyncio.Task[None] | None = None
         self._crash_count = 0
+        self._started_at = 0.0
 
     def _set_state(self, state: ProcessState) -> None:
         """Update state and notify `on_state_change`, if set."""
@@ -140,6 +145,7 @@ class ManagedProcess:
             return
 
         self.exit_code = None
+        self._started_at = time.monotonic()
         self._set_state(ProcessState.RUNNING)
         self._pump_task = asyncio.create_task(self._pump_output())
         self._wait_task = asyncio.create_task(self._await_exit())
@@ -170,6 +176,8 @@ class ManagedProcess:
         else:
             self._set_state(ProcessState.CRASHED)
             self._report_error(f"exited with code {returncode}")
+            if time.monotonic() - self._started_at >= STABLE_UPTIME:
+                self._crash_count = 0
             if self.config.autorestart:
                 self._schedule_restart()
 
