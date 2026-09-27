@@ -175,6 +175,7 @@ class DevpApp(App[None]):
 
     def __init__(self, manager: ProcessManager) -> None:
         super().__init__()
+        self.theme = "rose-pine"
         self.manager = manager
         self.manager.build(
             on_output=self._on_output,

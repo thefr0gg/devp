@@ -20,7 +20,6 @@ from textual.strip import Strip
 # ANSI escape sequences (colors, cursor movement, window titles) that processes print.
 _sub_ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])").sub
 _sub_control = re.compile("[\u0000-\u001f\u007f]").sub
-_MATCH_STYLE = Style.parse("black on yellow")
 
 
 def _clean(line: str) -> str:
@@ -184,6 +183,11 @@ class LogView(ScrollView, can_focus=True):
         super().notify_style_update()
         self._clear_caches()
 
+    def _match_style(self) -> Style:
+        """Search-match highlight in the current theme's colors (dark text on warning)."""
+        variables = self.app.theme_variables
+        return Style(color=variables["background"], bgcolor=variables["warning"])
+
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """The selected text; selection offsets use absolute line indices."""
         if not self._lines:
@@ -240,7 +244,7 @@ class LogView(ScrollView, can_focus=True):
         line = self._lines[i]
         text = Text(line, end="")
         if self._highlight and self._highlight in line.lower():
-            text.stylize(_MATCH_STYLE)
+            text.stylize(self._match_style())
         if span is not None:
             start, end = span
             # Only take the selection background: the theme's selection foreground is

@@ -276,3 +276,11 @@ async def test_ctrl_c_quits_when_nothing_is_selected():
         await asyncio.sleep(0.5)
         assert not app.is_running
         assert app.manager.processes["sleeper"].state == ProcessState.STOPPED
+
+
+async def test_uses_the_rose_pine_theme():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.theme == "rose-pine"
+        await app.manager.shutdown_all()
