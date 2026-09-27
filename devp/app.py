@@ -48,6 +48,12 @@ def _status_detail(runnable: object) -> str | None:
     return None
 
 
+def _osc_color(color: str) -> str:
+    """A color as `rgb:RR/GG/BB`, the format every OSC 10/11 terminal accepts."""
+    r, g, b = Color.parse(color).rgb
+    return f"rgb:{r:02x}/{g:02x}/{b:02x}"
+
+
 class ProcessListItem(ListItem):
     """A sidebar row that remembers which process it represents."""
 
@@ -106,11 +112,15 @@ class DevpApp(App[None]):
     ListView, ListItem {
         background: transparent;
     }
+    /* Highlighted rows paint their own background, so they pair it with the theme's
+       text color rather than the terminal default (which could be dark on dark). */
     ListView > ListItem.-highlight {
         background: $panel;
+        color: $foreground;
     }
     ListView:focus > ListItem.-highlight {
         background: $accent 40%;
+        color: $foreground;
         text-style: bold;
     }
     #log {
@@ -153,6 +163,16 @@ class DevpApp(App[None]):
     Toast.-error {
         border: round $error;
     }
+    /* Body text uses the terminal's default text color (see ansi_color in __init__),
+       so it stays readable on any terminal background. Accents stay themed. */
+    ListView > ListItem,
+    FooterKey .footer-key--description,
+    FooterLabel,
+    Toast.-information .toast--title,
+    Toast.-warning .toast--title,
+    Toast.-error .toast--title {
+        color: ansi_default;
+    }
     #search-input {
         height: 3;
         border: round $accent;
@@ -176,7 +196,14 @@ class DevpApp(App[None]):
     ]
 
     def __init__(self, manager: ProcessManager) -> None:
-        super().__init__()
+        # ansi_color: draw the base background and text in the terminal's *default*
+        # colors instead of painting the theme's. Terminals pad the character grid with
+        # a margin no app can draw in, filled with that default background, so painting
+        # our own shows as a frame in every terminal; this matches it everywhere. The
+        # theme still colors everything else (borders, glyphs, highlights, toasts), and
+        # `_use_theme_as_terminal_colors` makes the defaults themselves Rosé Pine where
+        # the terminal allows it.
+        super().__init__(ansi_color=True)
         self.theme = "rose-pine"
         self.manager = manager
         self.manager.build(
@@ -235,7 +262,7 @@ class DevpApp(App[None]):
 
     async def on_mount(self) -> None:
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
-        self._set_terminal_background()
+        self._use_theme_as_terminal_colors()
         self.query_one("#search-input", Input).display = False
         sidebar = self.query_one("#sidebar", ListView)
         sidebar.border_title = "Processes"
@@ -245,22 +272,23 @@ class DevpApp(App[None]):
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
 
-    def _set_terminal_background(self) -> None:
-        """Make the terminal's default background the theme's, until devp exits.
+    def _use_theme_as_terminal_colors(self) -> None:
+        """Set the terminal's default background and text colors to the theme's until exit.
 
-        Terminals such as Windows Terminal pad the character grid with a margin the app
-        can't draw in; it's filled with the terminal's own background, which shows as
-        a black frame around the theme's background. OSC 11 changes that default
-        background (and so the padding); terminals that don't support it ignore it.
+        With these (OSC 11 / OSC 10) the base colors, and the terminal's padding, are
+        Rosé Pine. Terminals that don't support them ignore them, and devp simply sits
+        on the terminal's own colors with no mismatched frame and readable text.
         """
         if self._driver is not None:
-            r, g, b = Color.parse(self.theme_variables["background"]).rgb
-            self._driver.write(f"\x1b]11;rgb:{r:02x}/{g:02x}/{b:02x}\x07")
+            background = _osc_color(self.theme_variables["background"])
+            foreground = _osc_color(self.theme_variables["foreground"])
+            self._driver.write(f"\x1b]11;{background}\x07\x1b]10;{foreground}\x07")
 
     def on_unmount(self) -> None:
-        # Runs on every exit path, while the terminal is still ours: undo OSC 11 (OSC 111).
+        # Runs on every exit path, while the terminal is still ours: restore the
+        # terminal's own default colors (OSC 111 / OSC 110).
         if self._driver is not None:
-            self._driver.write("\x1b]111\x07")
+            self._driver.write("\x1b]111\x07\x1b]110\x07")
 
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.

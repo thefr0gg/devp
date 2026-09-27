@@ -321,7 +321,7 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         await app.manager.shutdown_all()
 
 
-async def test_terminal_background_matches_theme_while_running(monkeypatch):
+async def test_terminal_colors_match_theme_while_running(monkeypatch):
     written: list[str] = []
     monkeypatch.setattr(
         "textual.drivers.headless_driver.HeadlessDriver.write",
@@ -330,6 +330,26 @@ async def test_terminal_background_matches_theme_while_running(monkeypatch):
     app = make_app()
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert "\x1b]11;rgb:19/17/24\x07" in written  # Rosé Pine base
+        sent = "".join(written)
+        assert "\x1b]11;rgb:19/17/24\x07" in sent  # Rosé Pine base
+        assert "\x1b]10;rgb:e0/de/f4\x07" in sent  # Rosé Pine text
         await app.manager.shutdown_all()
-    assert written[-1] == "\x1b]111\x07"  # restored on exit
+    assert written[-1] == "\x1b]111\x07\x1b]110\x07"  # restored on exit
+
+
+async def test_base_background_is_the_terminal_default():
+    """No painted background: it would show as a frame against the terminal's padding."""
+    app = make_app()
+    async with app.run_test(size=(60, 12)) as pilot:
+        await pilot.pause()
+        app.query_one("#log").focus()  # sidebar row highlight is the only painted cell run
+        await pilot.pause()
+        cells = [
+            seg.style.bgcolor
+            for strip in app.screen._compositor.render_strips()
+            for seg in strip
+            if seg.text.strip() == "" and seg.style is not None
+        ]
+        painted = [bg for bg in cells if bg is not None and not bg.is_default]
+        assert len(painted) <= 30  # just the (unfocused) selected sidebar row
+        await app.manager.shutdown_all()
