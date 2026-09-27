@@ -317,9 +317,6 @@ text symbols (not emoji), so they line up in any terminal font; active states an
 - `✧` iris, twinkling slowly — a cron job, enabled and waiting for its next run (shown
   with a live countdown that ticks down every second, e.g. `✧ backup (next in 5m12s)`)
 
-When there's room below your processes, the mascot keeps you company at the bottom
-of the sidebar.
-
 Pressing `s` on a cron job triggers an immediate one-off run, independent of its
 schedule — handy for testing a job without waiting for it to come due.
 

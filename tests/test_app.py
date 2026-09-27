@@ -120,7 +120,7 @@ async def test_escape_is_a_noop_when_search_is_not_open():
 async def test_focused_pane_border_is_highlighted():
     app = make_app()
     async with app.run_test() as pilot:
-        sidebar = app.query_one("#sidebar-pane")
+        sidebar = app.query_one("#sidebar")
         log_pane = app.query_one("#log-pane")
         await pilot.pause()
         assert sidebar.styles.border_top[1] != log_pane.styles.border_top[1]
