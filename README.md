@@ -19,7 +19,8 @@ poetry install
 
 ## Quick start
 
-Create a `devp.toml` in your project's root:
+Run `devp init` in your project's root to create a starter `devp.toml`, or write
+one yourself:
 
 ```toml
 [[process]]
@@ -38,7 +39,7 @@ cwd = "frontend"
 autostart = false
 ```
 
-Then, from that same directory, run:
+Then run:
 
 ```bash
 poetry run devp
@@ -46,6 +47,20 @@ poetry run devp
 
 You'll see a sidebar listing `api`, `worker`, and `frontend`. `api` and `worker`
 start automatically; `frontend` waits until you start it yourself.
+
+### Command line
+
+```text
+devp                      run the nearest devp.toml (here or in a parent directory)
+devp -c path/to/file.toml run a specific config file
+devp init [--force]       create a starter devp.toml here (--force overwrites one)
+devp --version            print the version
+```
+
+Like `git`, devp looks for `devp.toml` in the current directory and then each parent
+directory, so you can launch it from anywhere inside your project. It always runs
+from the directory that contains the config, so relative `cwd` and `watch` paths
+mean the same thing wherever you start it from.
 
 ## Configuring `devp.toml`
 
@@ -273,11 +288,13 @@ The codebase is small and split by responsibility:
 - `devp/process.py` — spawns, monitors, and controls a single subprocess
 - `devp/cron.py` — runs a process on a recurring schedule, reusing `devp/process.py`
 - `devp/manager.py` — builds and coordinates every configured process and cron job
+- `devp/watch.py` — polls `watch` globs and reports changed files
+- `devp/ansi.py` — strips terminal escape codes from process output
 - `devp/app.py` — the Textual TUI (sidebar, log pane, keybindings)
 - `devp/log_view.py` — the log pane: wraps and renders only visible rows, handles selection
 - `devp/clipboard.py` — copies to the system clipboard with the platform's native tool
 - `devp/messages.py` / `devp/widgets.py` — small supporting pieces for the TUI
-- `devp/__main__.py` — the `devp` command's entry point
+- `devp/__main__.py` — the `devp` command: config discovery, `-c`, `init`
 
 ## Known limitations
 
