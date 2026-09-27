@@ -8,12 +8,14 @@ from functools import partial
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.color import Color
 from textual.containers import Horizontal, Vertical
 from textual.events import Click, Resize
 from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
+from textual.worker import Worker
 
 from devp.clipboard import copy_native
 from devp.cron import CronJob
@@ -44,6 +46,12 @@ def _status_detail(runnable: object) -> str | None:
         remaining = (runnable.next_run_at - datetime.now()).total_seconds()
         return f"next in {format_duration(remaining)}"
     return None
+
+
+def _osc_color(color: str) -> str:
+    """A color as `rgb:RR/GG/BB`, the format every OSC 10/11 terminal accepts."""
+    r, g, b = Color.parse(color).rgb
+    return f"rgb:{r:02x}/{g:02x}/{b:02x}"
 
 
 class ProcessListItem(ListItem):
@@ -104,11 +112,15 @@ class DevpApp(App[None]):
     ListView, ListItem {
         background: transparent;
     }
+    /* Highlighted rows paint their own background, so they pair it with the theme's
+       text color rather than the terminal default (which could be dark on dark). */
     ListView > ListItem.-highlight {
         background: $panel;
+        color: $foreground;
     }
     ListView:focus > ListItem.-highlight {
         background: $accent 40%;
+        color: $foreground;
         text-style: bold;
     }
     #log {
@@ -151,6 +163,16 @@ class DevpApp(App[None]):
     Toast.-error {
         border: round $error;
     }
+    /* Body text uses the terminal's default text color (see ansi_color in __init__),
+       so it stays readable on any terminal background. Accents stay themed. */
+    ListView > ListItem,
+    FooterKey .footer-key--description,
+    FooterLabel,
+    Toast.-information .toast--title,
+    Toast.-warning .toast--title,
+    Toast.-error .toast--title {
+        color: ansi_default;
+    }
     #search-input {
         height: 3;
         border: round $accent;
@@ -174,7 +196,14 @@ class DevpApp(App[None]):
     ]
 
     def __init__(self, manager: ProcessManager) -> None:
-        super().__init__()
+        # ansi_color: draw the base background and text in the terminal's *default*
+        # colors instead of painting the theme's. Terminals pad the character grid with
+        # a margin no app can draw in, filled with that default background, so painting
+        # our own shows as a frame in every terminal; this matches it everywhere. The
+        # theme still colors everything else (borders, glyphs, highlights, toasts), and
+        # `_use_theme_as_terminal_colors` makes the defaults themselves Rosé Pine where
+        # the terminal allows it.
+        super().__init__(ansi_color=True)
         self.theme = "rose-pine"
         self.manager = manager
         self.manager.build(
@@ -189,6 +218,7 @@ class DevpApp(App[None]):
         self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
         self._pending_lines: list[str] = []
+        self._autostart: Worker[None] | None = None
         self._glyph_frame = 0
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
@@ -232,13 +262,33 @@ class DevpApp(App[None]):
 
     async def on_mount(self) -> None:
         """Focus the sidebar, hide the search bar, and autostart configured processes."""
+        self._use_theme_as_terminal_colors()
         self.query_one("#search-input", Input).display = False
         sidebar = self.query_one("#sidebar", ListView)
         sidebar.border_title = "Processes"
         sidebar.focus()
         self._refresh_log_pane()
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
-        await self.manager.autostart()
+        # In the background: waiting on dependencies' ready checks mustn't block the UI.
+        self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+
+    def _use_theme_as_terminal_colors(self) -> None:
+        """Set the terminal's default background and text colors to the theme's until exit.
+
+        With these (OSC 11 / OSC 10) the base colors, and the terminal's padding, are
+        Rosé Pine. Terminals that don't support them ignore them, and devp simply sits
+        on the terminal's own colors with no mismatched frame and readable text.
+        """
+        if self._driver is not None:
+            background = _osc_color(self.theme_variables["background"])
+            foreground = _osc_color(self.theme_variables["foreground"])
+            self._driver.write(f"\x1b]11;{background}\x07\x1b]10;{foreground}\x07")
+
+    def on_unmount(self) -> None:
+        # Runs on every exit path, while the terminal is still ours: restore the
+        # terminal's own default colors (OSC 111 / OSC 110).
+        if self._driver is not None:
+            self._driver.write("\x1b]111\x07\x1b]110\x07")
 
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.
@@ -297,7 +347,10 @@ class DevpApp(App[None]):
 
         name = escape(message.process_name)
         if message.state == ProcessState.RUNNING:
-            self.notify(f"'{name}' started", severity="information", timeout=3)
+            runnable = self.manager.processes.get(message.process_name)
+            has_check = runnable is not None and getattr(runnable.config, "has_ready_check", False)
+            verb = "is ready" if has_check else "started"
+            self.notify(f"'{name}' {verb}", severity="information", timeout=3)
         elif message.state == ProcessState.STOPPED:
             self.notify(f"'{name}' stopped", severity="information", timeout=3)
 
@@ -479,5 +532,7 @@ class DevpApp(App[None]):
 
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""
+        if self._autostart is not None:
+            self._autostart.cancel()  # don't let a pending start spawn after shutdown
         await self.manager.shutdown_all()
         self.exit()

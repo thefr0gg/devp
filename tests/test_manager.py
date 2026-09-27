@@ -144,3 +144,64 @@ async def test_shutdown_stops_dependents_before_dependencies():
     await manager.shutdown_all()
 
     assert call_order == ["api", "db"]
+
+
+async def test_dependents_wait_for_a_dependency_to_be_ready():
+    import asyncio
+
+    config = Config(
+        processes=[
+            ProcessConfig(
+                name="db",
+                command=python_command(
+                    "import time; time.sleep(0.4); print('ready to accept connections'); "
+                    "time.sleep(30)"
+                ),
+                ready_when="ready to accept",
+            ),
+            ProcessConfig(
+                name="api",
+                command=python_command("import time; time.sleep(30)"),
+                depends_on=["db"],
+            ),
+        ],
+        crons=[],
+    )
+    manager = ProcessManager(config)
+    events = []
+    manager.build(on_state_change=lambda name, state: events.append((name, state)))
+
+    await asyncio.wait_for(manager.autostart(), 5)
+    assert events.index(("db", ProcessState.RUNNING)) < events.index(("api", ProcessState.RUNNING))
+    assert ("db", ProcessState.STARTING) in events
+
+    await manager.shutdown_all()
+
+
+async def test_dependents_are_not_started_when_a_dependency_never_becomes_ready():
+    import asyncio
+
+    config = Config(
+        processes=[
+            ProcessConfig(
+                name="db", command=python_command("import sys; sys.exit(1)"), ready_when="ready"
+            ),
+            ProcessConfig(
+                name="api",
+                command=python_command("import time; time.sleep(30)"),
+                depends_on=["db"],
+            ),
+        ],
+        crons=[],
+    )
+    manager = ProcessManager(config)
+    errors = []
+    manager.build(on_error=lambda name, text: errors.append((name, text)))
+
+    await asyncio.wait_for(manager.autostart(), 5)
+    api = manager.processes["api"]
+    assert api.state == ProcessState.STOPPED
+    assert ("api", "not started: 'db' didn't become ready") in errors
+    assert any("not started" in line for line in api.output)
+
+    await manager.shutdown_all()

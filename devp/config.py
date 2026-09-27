@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,14 @@ class ProcessConfig:
     autostart: bool = True
     autorestart: bool = False
     depends_on: list[str] = field(default_factory=list)
+    ready_when: str | None = None  # regex matched against each output line
+    ready_port: int | None = None  # TCP port on localhost that must accept connections
+    ready_timeout: float = 60.0
+    watch: list[str] = field(default_factory=list)  # globs; restart the process on changes
+
+    @property
+    def has_ready_check(self) -> bool:
+        return self.ready_when is not None or self.ready_port is not None
 
 
 @dataclass(frozen=True)
@@ -112,6 +121,47 @@ def _validate_depends_on(entry: dict[str, Any], location: str, name: str) -> lis
     return list(depends_on)
 
 
+def _validate_ready(entry: dict[str, Any], location: str, name: str) -> dict[str, Any]:
+    """Validate the optional readiness check: `ready_when` or `ready_port`, plus a timeout."""
+    where = f"{location} ('{name}')"
+    ready_when = entry.get("ready_when")
+    ready_port = entry.get("ready_port")
+    ready_timeout = entry.get("ready_timeout", 60)
+
+    if ready_when is not None and ready_port is not None:
+        raise ConfigError(f"{where}: set either 'ready_when' or 'ready_port', not both")
+    if ready_when is not None:
+        if not isinstance(ready_when, str) or not ready_when:
+            raise ConfigError(f"{where}: 'ready_when' must be a non-empty string")
+        try:
+            re.compile(ready_when)
+        except re.error as exc:
+            raise ConfigError(
+                f"{where}: 'ready_when' is not a valid regular expression: {exc}"
+            ) from exc
+    if ready_port is not None and not (_is_int(ready_port) and 1 <= ready_port <= 65535):
+        raise ConfigError(f"{where}: 'ready_port' must be a port number (1-65535)")
+    if not (_is_int(ready_timeout) or isinstance(ready_timeout, float)) or ready_timeout <= 0:
+        raise ConfigError(f"{where}: 'ready_timeout' must be a positive number of seconds")
+
+    return {
+        "ready_when": ready_when,
+        "ready_port": ready_port,
+        "ready_timeout": float(ready_timeout),
+    }
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_watch(entry: dict[str, Any], location: str, name: str) -> list[str]:
+    watch = entry.get("watch", [])
+    if not isinstance(watch, list) or not all(isinstance(p, str) and p.strip() for p in watch):
+        raise ConfigError(f"{location} ('{name}'): 'watch' must be a list of glob patterns")
+    return list(watch)
+
+
 def _parse_process(entry: dict[str, Any], location: str, seen_names: set[str]) -> ProcessConfig:
     name = _validate_name(entry, location, seen_names)
     return ProcessConfig(
@@ -122,6 +172,8 @@ def _parse_process(entry: dict[str, Any], location: str, seen_names: set[str]) -
         autostart=_validate_bool(entry, "autostart", location, name, default=True),
         autorestart=_validate_bool(entry, "autorestart", location, name, default=False),
         depends_on=_validate_depends_on(entry, location, name),
+        **_validate_ready(entry, location, name),
+        watch=_validate_watch(entry, location, name),
     )
 
 

@@ -17,8 +17,8 @@ from textual.scroll_view import ScrollView
 from textual.selection import Selection
 from textual.strip import Strip
 
-# ANSI escape sequences (colors, cursor movement, window titles) that processes print.
-_sub_ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])").sub
+from devp.ansi import strip_ansi
+
 _sub_control = re.compile("[\u0000-\u001f\u007f]").sub
 
 
@@ -28,9 +28,7 @@ def _clean(line: str) -> str:
     Every remaining character then has a predictable cell width, which the row
     counting in `LogView` relies on.
     """
-    if "\x1b" in line:
-        line = _sub_ansi("", line)
-    return _sub_control("�", line.expandtabs())
+    return _sub_control("�", strip_ansi(line).expandtabs())
 
 
 class LogView(ScrollView, can_focus=True):

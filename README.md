@@ -19,7 +19,8 @@ poetry install
 
 ## Quick start
 
-Create a `devp.toml` in your project's root:
+Run `devp init` in your project's root to create a starter `devp.toml`, or write
+one yourself:
 
 ```toml
 [[process]]
@@ -38,7 +39,7 @@ cwd = "frontend"
 autostart = false
 ```
 
-Then, from that same directory, run:
+Then run:
 
 ```bash
 poetry run devp
@@ -46,6 +47,20 @@ poetry run devp
 
 You'll see a sidebar listing `api`, `worker`, and `frontend`. `api` and `worker`
 start automatically; `frontend` waits until you start it yourself.
+
+### Command line
+
+```text
+devp                      run the nearest devp.toml (here or in a parent directory)
+devp -c path/to/file.toml run a specific config file
+devp init [--force]       create a starter devp.toml here (--force overwrites one)
+devp --version            print the version
+```
+
+Like `git`, devp looks for `devp.toml` in the current directory and then each parent
+directory, so you can launch it from anywhere inside your project. It always runs
+from the directory that contains the config, so relative `cwd` and `watch` paths
+mean the same thing wherever you start it from.
 
 ## Configuring `devp.toml`
 
@@ -87,8 +102,9 @@ autorestart = true
 ```
 
 Restarts back off exponentially on repeated crashes (1s, 2s, 4s, ... capped at 30s),
-resetting once the process runs to a clean exit, so a persistently broken command
-doesn't spin in a tight loop. Pressing `x` to stop it cancels any restart that's
+so a persistently broken command doesn't spin in a tight loop. The backoff starts
+over after a clean exit, or when a crash comes after at least 30s of uptime — a
+process that crashes once an hour is restarted after 1s, not 30s. Pressing `x` to stop it cancels any restart that's
 pending, so a deliberate stop always sticks.
 
 ### Ordering startup and shutdown with `depends_on`
@@ -112,6 +128,60 @@ reversed — `api` stops before `db` does. devp validates the dependency graph w
 loads `devp.toml`: an unknown name, a dependency on something that doesn't autostart
 (it would never actually satisfy the dependency), or a circular `depends_on` are all
 rejected up front with a clear error, rather than surfacing as a runtime hang.
+
+#### Waiting until a dependency is ready
+
+By default a dependency counts as started as soon as its process has spawned, which
+is often before it can actually accept work. Add a readiness check to make its
+dependents wait until it's really up:
+
+```toml
+[[process]]
+name = "db"
+command = "docker run --rm -p 5432:5432 postgres"
+ready_port = 5432            # ready once localhost:5432 accepts connections
+
+[[process]]
+name = "api"
+command = "uvicorn app:app --reload"
+depends_on = ["db"]
+ready_when = "Application startup complete"   # ready once a line matches this regex
+ready_timeout = 30           # seconds; default 60
+```
+
+| Key             | Type    | Default | Description                                                        |
+|-----------------|---------|---------|--------------------------------------------------------------------|
+| `ready_when`    | string  | —       | A regular expression; ready once an output line matches it (color codes are ignored). |
+| `ready_port`    | integer | —       | Ready once something accepts TCP connections on this port on localhost. |
+| `ready_timeout` | number  | `60`    | How long to wait for the check before giving up.                   |
+
+Use one of `ready_when` or `ready_port`, not both. Until its check passes, a process
+shows a rose spinner in the sidebar (“starting”), then switches to the usual running
+spinner with an “is ready” toast. If it exits before becoming ready, or the timeout
+passes, the processes that depend on it are left stopped, with a note in their log
+explaining why. You can still start them yourself with `s`.
+
+### Restarting on file changes
+
+Give a process a `watch` list of glob patterns and devp restarts it whenever a
+matching file is added, changed, or deleted, like `nodemon`:
+
+```toml
+[[process]]
+name = "worker"
+command = "python worker.py"
+watch = ["src/**/*.py", "config/*.yaml"]
+```
+
+Patterns are relative to the process's `cwd` (or the directory devp runs in). `*`
+and `?` match within one directory level and `**` matches any number of levels, so
+`src/**/*.py` covers `src/app.py` as well as `src/pkg/mod.py`. `.git`,
+`node_modules`, `__pycache__`, virtualenvs, and tool caches are always skipped.
+
+devp checks for changes about once a second, logs which file changed
+(`--- src/app.py changed, restarting ---`), and restarts the process. It only
+restarts a process that's running, starting, or crashed; if you stopped it with `x`,
+it stays stopped until you start it again.
 
 ### Cron jobs
 
@@ -162,6 +232,7 @@ devp uses the [Rosé Pine](https://rosepinetheme.com/) color theme. Each item in
 sidebar shows a status glyph. They're plain braille/text characters (not emoji), so
 they line up in any terminal font; active states animate:
 
+- `⠋` rose spinner — starting (waiting for its `ready_when` / `ready_port` check)
 - `⠋` foam spinner — running
 - `⠶` muted — stopped
 - `⠋` gold spinner — stopping
@@ -203,26 +274,6 @@ an error toast explaining why, in addition to the sidebar turning red.
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
 first, so nothing keeps running in the background after you close the terminal.
 
-## Development
-
-```bash
-poetry install
-poetry run pytest      # run the test suite
-poetry run devp         # run the app (needs a devp.toml in the cwd)
-```
-
-The codebase is small and split by responsibility:
-
-- `devp/config.py` — parses and validates `devp.toml`
-- `devp/process.py` — spawns, monitors, and controls a single subprocess
-- `devp/cron.py` — runs a process on a recurring schedule, reusing `devp/process.py`
-- `devp/manager.py` — builds and coordinates every configured process and cron job
-- `devp/app.py` — the Textual TUI (sidebar, log pane, keybindings)
-- `devp/log_view.py` — the log pane: wraps and renders only visible rows, handles selection
-- `devp/clipboard.py` — copies to the system clipboard with the platform's native tool
-- `devp/messages.py` / `devp/widgets.py` — small supporting pieces for the TUI
-- `devp/__main__.py` — the `devp` command's entry point
-
 ## Known limitations
 
 - On Windows, a graceful stop needs a real console attached to deliver
@@ -232,9 +283,6 @@ The codebase is small and split by responsibility:
   never arrive. Even with a console, `CTRL_BREAK_EVENT` only works for processes
   that handle it (Python, Node, and most console apps do); an unresponsive process
   still gets a hard kill once the stop timeout elapses.
-- `autorestart`'s crash-loop backoff resets only on a clean exit, not after a
-  crashy process has simply stayed up for a while — a process crashing once an hour
-  will still see its backoff climb toward the 30s cap over time.
 - Log search/filtering across multiple processes at once isn't supported — search
   always applies to whichever process's log is currently selected.
 

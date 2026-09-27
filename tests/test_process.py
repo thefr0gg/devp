@@ -203,3 +203,133 @@ async def test_windows_without_console_kills_immediately_without_waiting_out_the
 
     assert proc.state == ProcessState.STOPPED
     assert elapsed < 2.0  # should hard-kill immediately, not wait out the timeout
+
+
+async def test_crash_after_stable_uptime_resets_backoff(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 60.0)
+    monkeypatch.setattr(process_module, "STABLE_UPTIME", 0.3)
+    config = ProcessConfig(
+        name="flaky",
+        command=python_command("import sys, time; time.sleep(0.5); sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+    proc._crash_count = 5  # pretend it has been crash-looping
+
+    await proc.start()
+    await proc._wait_task
+    assert proc._crash_count == 1  # it ran longer than STABLE_UPTIME: backoff starts over
+    await proc.stop()
+
+
+async def test_quick_crashes_keep_escalating_backoff(monkeypatch):
+    monkeypatch.setattr(process_module, "_BASE_RESTART_DELAY", 60.0)
+    monkeypatch.setattr(process_module, "STABLE_UPTIME", 30.0)
+    config = ProcessConfig(
+        name="crashloop",
+        command=python_command("import sys; sys.exit(1)"),
+        autorestart=True,
+    )
+    proc = ManagedProcess(config)
+    proc._crash_count = 5
+
+    await proc.start()
+    await proc._wait_task
+    assert proc._crash_count == 6
+    await proc.stop()
+
+
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+async def test_ready_when_holds_starting_until_the_pattern_is_printed():
+    config = ProcessConfig(
+        name="api",
+        command=python_command(
+            "import time; print('booting'); time.sleep(0.4); "
+            "print('\\x1b[32mlistening on :8000\\x1b[0m'); time.sleep(30)"
+        ),
+        ready_when=r"listening on :\d+",
+    )
+    proc = ManagedProcess(config)
+    await proc.start()
+    assert proc.state == ProcessState.STARTING
+
+    assert await asyncio.wait_for(proc.wait_ready(), 5) is True
+    assert proc.state == ProcessState.RUNNING
+    await proc.stop()
+
+
+async def test_ready_port_waits_for_a_listening_socket():
+    port = free_port()
+    config = ProcessConfig(
+        name="db",
+        command=python_command(
+            "import socket, time; time.sleep(0.4); s = socket.socket(); "
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+            f"s.bind(('127.0.0.1', {port})); s.listen(); time.sleep(30)"
+        ),
+        ready_port=port,
+    )
+    proc = ManagedProcess(config)
+    await proc.start()
+    assert proc.state == ProcessState.STARTING
+
+    assert await asyncio.wait_for(proc.wait_ready(), 5) is True
+    assert proc.state == ProcessState.RUNNING
+    await proc.stop()
+
+
+async def test_exiting_before_ready_is_not_ready():
+    config = ProcessConfig(
+        name="api", command=python_command("import sys; sys.exit(3)"), ready_when="never"
+    )
+    proc = ManagedProcess(config)
+    await proc.start()
+    assert await asyncio.wait_for(proc.wait_ready(), 5) is False
+    await proc.wait()
+    assert proc.state == ProcessState.CRASHED
+
+
+async def test_ready_timeout_reports_and_leaves_process_running():
+    errors = []
+    config = ProcessConfig(
+        name="api",
+        command=python_command("import time; time.sleep(30)"),
+        ready_when="never printed",
+        ready_timeout=0.3,
+    )
+    proc = ManagedProcess(config, on_error=lambda name, text: errors.append(text))
+    await proc.start()
+
+    assert await asyncio.wait_for(proc.wait_ready(), 5) is False
+    assert proc.state == ProcessState.RUNNING
+    assert errors == ["no ready signal after 0.3s"]
+    assert "--- no ready signal after 0.3s ---" in proc.output
+    await proc.stop()
+
+
+async def test_stop_while_starting():
+    config = ProcessConfig(
+        name="api", command=python_command("import time; time.sleep(30)"), ready_when="never"
+    )
+    proc = ManagedProcess(config)
+    await proc.start()
+    assert proc.state == ProcessState.STARTING
+    await proc.stop()
+    assert proc.state == ProcessState.STOPPED
+    assert await proc.wait_ready() is False
+
+
+async def test_without_a_ready_check_the_process_is_ready_immediately():
+    config = ProcessConfig(name="api", command=python_command("import time; time.sleep(30)"))
+    proc = ManagedProcess(config)
+    await proc.start()
+    assert proc.state == ProcessState.RUNNING
+    assert await proc.wait_ready() is True
+    await proc.stop()
