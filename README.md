@@ -274,28 +274,6 @@ an error toast explaining why, in addition to the sidebar turning red.
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
 first, so nothing keeps running in the background after you close the terminal.
 
-## Development
-
-```bash
-poetry install
-poetry run pytest      # run the test suite
-poetry run devp         # run the app (needs a devp.toml in the cwd)
-```
-
-The codebase is small and split by responsibility:
-
-- `devp/config.py` — parses and validates `devp.toml`
-- `devp/process.py` — spawns, monitors, and controls a single subprocess
-- `devp/cron.py` — runs a process on a recurring schedule, reusing `devp/process.py`
-- `devp/manager.py` — builds and coordinates every configured process and cron job
-- `devp/watch.py` — polls `watch` globs and reports changed files
-- `devp/ansi.py` — strips terminal escape codes from process output
-- `devp/app.py` — the Textual TUI (sidebar, log pane, keybindings)
-- `devp/log_view.py` — the log pane: wraps and renders only visible rows, handles selection
-- `devp/clipboard.py` — copies to the system clipboard with the platform's native tool
-- `devp/messages.py` / `devp/widgets.py` — small supporting pieces for the TUI
-- `devp/__main__.py` — the `devp` command: config discovery, `-c`, `init`
-
 ## Known limitations
 
 - On Windows, a graceful stop needs a real console attached to deliver
