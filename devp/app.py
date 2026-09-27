@@ -48,6 +48,24 @@ def _status_detail(runnable: object) -> str | None:
     return None
 
 
+def _log_title(name: str | None, runnable: object | None) -> str:
+    """The log pane title: the process name plus live details, e.g.
+    `Logs · api · pid 4312 · up 5m12s · restarts 2`, or `Logs · api · exit 1`."""
+    if name is None or runnable is None:
+        return "Logs"
+    details = []
+    pid = getattr(runnable, "pid", None)
+    if pid is not None:
+        details += [f"pid {pid}", f"up {format_duration(runnable.uptime or 0)}"]
+        restarts = runnable.start_count - 1
+        if restarts > 0 and not isinstance(runnable, CronJob):
+            details.append(f"restarts {restarts}")
+    elif runnable.exit_code is not None:
+        details.append(f"exit {runnable.exit_code}")
+    title = f"Logs · {escape(name)}"
+    return title + "".join(f" [dim]· {detail}[/dim]" for detail in details)
+
+
 def _osc_color(color: str) -> str:
     """A color as `rgb:RR/GG/BB`, the format every OSC 10/11 terminal accepts."""
     r, g, b = Color.parse(color).rgb
@@ -225,6 +243,7 @@ class DevpApp(App[None]):
         self._glyph_frame = 0
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
+        self._log_pane = Vertical(id="log-pane")
 
     def compose(self) -> ComposeResult:
         """Lay out the sidebar (process list) and the log pane side by side."""
@@ -236,7 +255,7 @@ class DevpApp(App[None]):
                 self._list_items[name] = item
                 items.append(item)
             yield ListView(*items, id="sidebar")
-            with Vertical(id="log-pane"):
+            with self._log_pane:
                 yield self._log_view
                 yield Input(placeholder="› search logs", id="search-input")
         yield Footer()
@@ -293,6 +312,13 @@ class DevpApp(App[None]):
         if self._driver is not None:
             self._driver.write("\x1b]111\x07\x1b]110\x07")
 
+    def _update_log_title(self) -> None:
+        if not self._log_pane.is_attached:  # the sidebar timer can fire during shutdown
+            return
+        title = _log_title(self.selected_name, self._selected_process())
+        if self._log_pane.border_title != title:
+            self._log_pane.border_title = title
+
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.
 
@@ -305,6 +331,7 @@ class DevpApp(App[None]):
             state = runnable.state
             if is_animated(state) or isinstance(runnable, CronJob):
                 item.set_status(state, _status_detail(runnable), self._glyph_frame)
+        self._update_log_title()  # uptime ticks; pid/exit code change with the state
 
     def _on_output(self, process_name: str, line: str) -> None:
         """Queue a line of the selected process's output for the next batched log write.
@@ -376,9 +403,7 @@ class DevpApp(App[None]):
 
     def _refresh_log_pane(self) -> None:
         """Clear the log pane and replay the selected process's buffered output into it."""
-        self.query_one("#log-pane").border_title = (
-            f"Logs · {escape(self.selected_name)}" if self.selected_name else "Logs"
-        )
+        self._update_log_title()
         self._discard_pending_lines()
         log = self._log_view
         log.clear()

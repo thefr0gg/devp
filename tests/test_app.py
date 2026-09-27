@@ -1,4 +1,5 @@
 import asyncio
+import re
 import sys
 
 import pytest
@@ -28,6 +29,14 @@ def make_app(**process_kwargs) -> DevpApp:
         crons=[],
     )
     return DevpApp(ProcessManager(config))
+
+
+async def _wait_for(predicate, timeout=5.0):
+    for _ in range(int(timeout / 0.05)):
+        if predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met in time")
 
 
 async def test_escape_closes_search_restores_focus_and_clears_text():
@@ -121,7 +130,7 @@ async def test_focused_pane_border_is_highlighted():
         await pilot.pause()
         assert log_pane.styles.border_top[1] == sidebar_focused_color
         assert sidebar.styles.border_top[1] != sidebar_focused_color
-        assert log_pane.border_title == "Logs · sleeper"
+        assert log_pane.border_title.startswith("Logs · sleeper")
 
 
 async def test_search_highlights_and_navigates_matches():
@@ -291,7 +300,7 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         processes=[
             ProcessConfig(
                 name="db",
-                command=python_command("import time; time.sleep(1.5); print('up'); time.sleep(30)"),
+                command=python_command("import time; time.sleep(3); print('up'); time.sleep(30)"),
                 ready_when="up",
             ),
             ProcessConfig(
@@ -312,11 +321,7 @@ async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
         assert app.selected_name == "api"
         assert app.manager.processes["db"].state == ProcessState.STARTING
 
-        for _ in range(60):
-            if app.manager.processes["api"].state == ProcessState.RUNNING:
-                break
-            await asyncio.sleep(0.05)
-        assert app.manager.processes["api"].state == ProcessState.RUNNING
+        await _wait_for(lambda: app.manager.processes["api"].state == ProcessState.RUNNING, 10)
 
         await app.manager.shutdown_all()
 
@@ -371,14 +376,6 @@ def two_process_app() -> DevpApp:
     return DevpApp(ProcessManager(config))
 
 
-async def _wait_for(predicate, timeout=5.0):
-    for _ in range(int(timeout / 0.05)):
-        if predicate():
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError("condition not met in time")
-
-
 async def test_start_all_and_stop_all():
     app = two_process_app()
     async with app.run_test() as pilot:
@@ -402,15 +399,32 @@ async def test_clear_log_empties_the_selected_process_buffer():
         await pilot.pause()
         sleeper = app.manager.processes["sleeper"]
         sleeper.log("old line")
-        await asyncio.sleep(0.1)
         log = app.query_one("#log")
-        assert log.line_count == 1
+        await _wait_for(lambda: log.line_count == 1)
 
         await pilot.press("c")
         await pilot.pause()
         assert log.line_count == 0 and len(sleeper.output) == 0
 
         sleeper.log("new line")  # later output still streams in
-        await asyncio.sleep(0.1)
-        assert log.find("new line")
+        await _wait_for(lambda: log.find("new line"))
+        await app.manager.shutdown_all()
+
+
+async def test_log_title_shows_live_process_details():
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        sleeper = app.manager.processes["sleeper"]
+        log_pane = app.query_one("#log-pane")
+        await _wait_for(lambda: f"pid {sleeper.pid}" in str(log_pane.border_title))
+        assert re.search(r"up \d+s", log_pane.border_title)
+        assert "restarts" not in log_pane.border_title
+
+        await sleeper.restart()
+        await _wait_for(lambda: "restarts 1" in str(log_pane.border_title))
+
+        await sleeper.stop()
+        await _wait_for(lambda: "pid" not in str(log_pane.border_title))
+        assert "exit" in log_pane.border_title
         await app.manager.shutdown_all()

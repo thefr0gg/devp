@@ -52,6 +52,18 @@ class CronJob:
         return self._process.exit_code
 
     @property
+    def pid(self) -> int | None:
+        return self._process.pid
+
+    @property
+    def uptime(self) -> float | None:
+        return self._process.uptime
+
+    @property
+    def start_count(self) -> int:
+        return self._process.start_count
+
+    @property
     def last_error(self) -> str | None:
         return self._process.last_error
 

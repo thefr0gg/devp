@@ -83,6 +83,7 @@ class ManagedProcess:
         self._started_at = 0.0
         self._ready: asyncio.Future[bool] | None = None
         self._start_lock = asyncio.Lock()
+        self.start_count = 0  # successful spawns, so restarts = start_count - 1
         self._ready_task: asyncio.Task[None] | None = None
         self._ready_pattern = re.compile(config.ready_when) if config.ready_when else None
 
@@ -162,6 +163,7 @@ class ManagedProcess:
             return
 
         self.exit_code = None
+        self.start_count += 1
         self._started_at = time.monotonic()
         self._ready = asyncio.get_running_loop().create_future()
         if self.config.has_ready_check:
@@ -172,6 +174,20 @@ class ManagedProcess:
             self._set_state(ProcessState.RUNNING)
         self._pump_task = asyncio.create_task(self._pump_output())
         self._wait_task = asyncio.create_task(self._await_exit())
+
+    @property
+    def pid(self) -> int | None:
+        """The OS process id of the current run, while one is alive."""
+        if self._proc is None or self.state not in (ProcessState.STARTING, ProcessState.RUNNING):
+            return None
+        return self._proc.pid
+
+    @property
+    def uptime(self) -> float | None:
+        """Seconds since the current run started, while one is alive."""
+        if self.pid is None:
+            return None
+        return time.monotonic() - self._started_at
 
     async def wait_ready(self) -> bool:
         """Wait until the current run is ready to serve its dependents.
