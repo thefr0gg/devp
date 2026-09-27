@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/mascot.png" alt="devp's mascot: a pixel-art bunny in a top hat, waving a magic wand" width="192">
+  <img src="assets/mascot.gif" alt="devp's mascot: a pixel-art bunny in a top hat, swinging a magic wand that throws red sparks, then jumping and twirling it" width="240">
 </p>
 
 # devp
