@@ -18,7 +18,7 @@ class LogApp(App[None]):
 @pytest.mark.filterwarnings("ignore")
 def test_clean_strips_ansi_and_control_characters():
     assert _clean("\x1b[32mgreen\x1b[0m\tok\x1b]0;title\x07") == "green   ok"
-    assert _clean("a\x00b") == "a�b"
+    assert _clean("a\x00b\x07c\ufeffd") == "abcd"  # invisible control characters dropped
 
 
 async def test_long_lines_wrap_to_extra_rows():
@@ -152,3 +152,34 @@ async def test_raw_colored_lines_are_pruned_with_the_buffer():
         assert sorted(log._ansi) == [7, 8, 9]
         log.clear()
         assert log._ansi == {}
+
+
+async def test_colored_lines_with_control_characters_keep_their_colors():
+    app = LogApp()
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        log.write_lines(["﻿\x1b[31mERROR\x1b[0m\x07 disk full"])
+        await pilot.pause()
+        assert log.find("ERROR disk full") == [0]
+        segments = {seg.text: seg.style for seg in log.render_line(0) if seg.text.strip()}
+        assert segments["ERROR"].color.number == 1
+
+
+async def test_emoji_cjk_and_symbols_render_at_their_real_width():
+    app = LogApp()
+    async with app.run_test(size=(40, 10)) as pilot:
+        log = app.query_one(LogView)
+        await pilot.pause()
+        lines = [
+            "🚀 ✅ ⚠️ ❤️ 👨‍👩‍👧 🇫🇷 👍🏽",
+            "日本語 한국어 ┌──┐ ⠋⠙  é",
+            "🚀日本" * 10,  # wraps: every row must still be exactly the widget's width
+        ]
+        log.write_lines(lines)
+        await pilot.pause()
+        width = log.size.width
+        rows = [log.render_line(y) for y in range(log.virtual_size.height)]
+        assert len(rows) > len(lines)
+        assert all(strip.cell_length == width for strip in rows)
+        assert log.find("👨‍👩‍👧") == [0] and log.find("日本語") == [1]

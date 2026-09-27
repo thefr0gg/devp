@@ -19,16 +19,23 @@ from textual.strip import Strip
 
 from devp.ansi import only_sgr, strip_ansi
 
-_sub_control = re.compile("[\u0000-\u001f\u007f]").sub
+# Control characters (bell, NUL, shift-in/out, C1 codes, stray ESCs, byte-order marks)
+# have no visible form in a log; drop them rather than show them as boxes.
+_sub_control = re.compile("[\u0000-\u001f\u007f-\u009f\ufeff]").sub
+# The same for raw colored lines, minus ESC (their color codes still need decoding)
+# and tab (expanded to spaces afterwards, as in the plain text).
+_sub_control_keep_esc = re.compile(
+    "[\u0000-\u0008\u000a-\u001a\u001c-\u001f\u007f-\u009f\ufeff]"
+).sub
 
 
 def _clean(line: str) -> str:
-    """Strip ANSI escapes, expand tabs, and replace other control characters.
+    """Strip ANSI escapes, expand tabs, and drop other control characters.
 
     Every remaining character then has a predictable cell width, which the row
     counting in `LogView` relies on.
     """
-    return _sub_control("�", strip_ansi(line).expandtabs())
+    return _sub_control("", strip_ansi(line).expandtabs())
 
 
 class LogView(ScrollView, can_focus=True):
@@ -262,7 +269,7 @@ class LogView(ScrollView, can_focus=True):
         """
         raw = self._ansi.get(index)
         if raw is not None:
-            text = Text.from_ansi(only_sgr(raw), end="")
+            text = Text.from_ansi(_sub_control_keep_esc("", only_sgr(raw)), end="")
             text.expand_tabs()
             if text.plain == line:
                 return text

@@ -316,7 +316,13 @@ where one is installed, your system's clipboard tool (`pbcopy`, `clip`, `wl-copy
 
 Selecting a process shows its full scrollback in the log pane on the right, and new
 output keeps streaming in live, in the colors the process printed it with (color
-codes are shown as colors; search and copy work on the plain text). If a process crashes or fails to start, you'll see
+codes are shown as colors; search and copy work on the plain text).
+Emoji, CJK text, box drawing, and Nerd Font glyphs are shown at their real width.
+Progress bars and spinners that redraw a line in place (with `\r`) show their final
+state, e.g. `[100%] done`, instead of every intermediate frame, and output that
+isn't UTF-8 is decoded with the system's legacy encoding on Windows. Python
+processes are started with `PYTHONIOENCODING=utf-8` (unless you set it yourself),
+so printing an emoji can't crash them on Windows. If a process crashes or fails to start, you'll see
 an error toast explaining why, in addition to the sidebar turning red.
 
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
