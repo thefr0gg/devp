@@ -165,7 +165,7 @@ class HelpScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="help-dialog") as dialog:
-            dialog.border_title = "devp keys"
+            dialog.border_title = "✦ devp keys ✦"
             dialog.border_subtitle = "? / Esc to close"
             yield Static(self._render_help())
 

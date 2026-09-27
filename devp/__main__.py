@@ -28,6 +28,9 @@ STARTER_CONFIG = f"""\
 # devp.toml: the processes devp runs. See the README for every option.
 
 {VERSION_HEADER}
+# [defaults]
+# shell = "bash"             # shell for string commands (default: sh, or cmd on Windows)
+
 [[process]]
 name = "web"
 command = "python -m http.server 8000"

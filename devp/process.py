@@ -14,8 +14,9 @@ from collections import deque
 from collections.abc import Callable
 from enum import Enum, auto
 
-from devp.ansi import strip_ansi
+from devp.ansi import resolve_overwrites, strip_ansi
 from devp.config import ProcessConfig
+from devp.shell import shell_argv
 
 _IS_WINDOWS = sys.platform == "win32"
 MAX_BUFFER_LINES = 5000
@@ -26,6 +27,40 @@ _MAX_RESTART_DELAY = 30.0
 # process that crashes once in a long while isn't treated like a crash loop.
 STABLE_UPTIME = 30.0
 _PORT_POLL_INTERVAL = 0.25
+_READ_CHUNK = 64 * 1024
+# A "line" that goes this long without a newline (e.g. a progress bar that only ever
+# redraws with "\r") is flushed as-is rather than buffered without limit.
+_MAX_LINE_BYTES = 1024 * 1024
+
+
+def _fallback_encoding() -> str:
+    """How to decode output that isn't valid UTF-8.
+
+    On Windows, console programs that don't write UTF-8 use the console's code page
+    (e.g. cp437 or cp1252), so decode with that. Elsewhere output is UTF-8 in
+    practice, and invalid bytes are shown as replacement characters.
+    """
+    if _IS_WINDOWS:
+        import ctypes
+
+        code_page = ctypes.windll.kernel32.GetConsoleOutputCP()
+        if code_page and code_page != 65001:
+            return f"cp{code_page}"
+        import locale
+
+        return locale.getpreferredencoding(False) or "utf-8"
+    return "utf-8"
+
+
+_FALLBACK_ENCODING = _fallback_encoding()
+
+
+def decode_output(raw: bytes) -> str:
+    """Decode one line of process output: UTF-8, or the platform's legacy encoding."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(_FALLBACK_ENCODING, errors="replace")
 
 OutputCallback = Callable[[str, str], None]
 StateCallback = Callable[[str, "ProcessState"], None]
@@ -131,6 +166,10 @@ class ManagedProcess:
             self._restart_task = None
 
         env = {**os.environ, **self.config.env}
+        # Python children default to the console's legacy code page when writing to a
+        # pipe on Windows, where printing an emoji raises UnicodeEncodeError. Ask them
+        # for UTF-8 unless the environment already says otherwise.
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         popen_kwargs: dict[str, object] = {
             "cwd": self.config.cwd,
             "env": env,
@@ -148,9 +187,13 @@ class ManagedProcess:
 
         try:
             if isinstance(self.config.command, str):
-                self._proc = await asyncio.create_subprocess_shell(
-                    self.config.command, **popen_kwargs
-                )
+                argv = shell_argv(self.config.shell, self.config.command)
+                if argv is None:  # the system default: sh, or COMSPEC (cmd) on Windows
+                    self._proc = await asyncio.create_subprocess_shell(
+                        self.config.command, **popen_kwargs
+                    )
+                else:
+                    self._proc = await asyncio.create_subprocess_exec(*argv, **popen_kwargs)
             else:
                 self._proc = await asyncio.create_subprocess_exec(
                     *self.config.command, **popen_kwargs
@@ -243,23 +286,42 @@ class ManagedProcess:
             return
 
     async def _pump_output(self) -> None:
-        """Read the process's merged stdout/stderr line by line into the scrollback buffer."""
+        """Read the process's merged stdout/stderr into the scrollback buffer, by line.
+
+        Reads in chunks and splits on newlines itself, rather than `readline`, which
+        raises (and would stop all further output) on a line longer than its 64 KiB
+        buffer limit.
+        """
         assert self._proc is not None
         assert self._proc.stdout is not None
+        stdout = self._proc.stdout
+        pending = b""
         try:
-            async for raw_line in self._proc.stdout:
-                line = raw_line.decode(errors="replace").rstrip("\r\n")
-                self.output.append(line)
-                if self.on_output is not None:
-                    self.on_output(self.config.name, line)
-                if (
-                    self._ready_pattern is not None
-                    and self.state == ProcessState.STARTING
-                    and self._ready_pattern.search(strip_ansi(line))
-                ):
-                    self._mark_ready()
+            while chunk := await stdout.read(_READ_CHUNK):
+                pending += chunk
+                *lines, pending = pending.split(b"\n")
+                for raw in lines:
+                    self._emit_line(raw)
+                if len(pending) > _MAX_LINE_BYTES:
+                    self._emit_line(pending)
+                    pending = b""
+            if pending:
+                self._emit_line(pending)
         except asyncio.CancelledError:
             pass
+
+    def _emit_line(self, raw: bytes) -> None:
+        """Record one line of output: decoded, with in-place redraws collapsed."""
+        line = resolve_overwrites(decode_output(raw).rstrip("\r").replace("\ufeff", ""))
+        self.output.append(line)
+        if self.on_output is not None:
+            self.on_output(self.config.name, line)
+        if (
+            self._ready_pattern is not None
+            and self.state == ProcessState.STARTING
+            and self._ready_pattern.search(strip_ansi(line))
+        ):
+            self._mark_ready()
 
     async def _await_exit(self) -> None:
         """Wait for the process to exit and set its final state (STOPPED or CRASHED)."""

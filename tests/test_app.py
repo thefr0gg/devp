@@ -190,10 +190,11 @@ async def test_running_process_glyph_animates():
     async with app.run_test() as pilot:
         await pilot.pause()
         item = app._list_items["sleeper"]
-        await asyncio.sleep(0.15)
-        first = item.label_text
-        await asyncio.sleep(0.25)
-        assert item.label_text != first
+        seen = set()
+        for _ in range(10):  # a full twinkle cycle is 0.8s
+            await asyncio.sleep(0.1)
+            seen.add(item.label_text)
+        assert len(seen) > 2
 
         await app.manager.shutdown_all()
 

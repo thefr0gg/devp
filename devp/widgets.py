@@ -6,20 +6,23 @@ from rich.markup import escape
 
 from devp.process import ProcessState
 
-# Braille-based glyphs: they render as plain monospace text in any terminal font,
-# unlike symbols such as ● or ✕ that many fonts draw as (wide, colored) emoji.
-# Active states cycle through frames; `frame` is a free-running counter.
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_ORBIT = "⠁⠈⠐⠠⢀⡀⠄⠂"
+# Status glyphs are the sparks from the mascot's magic wand. They're all single-width
+# text symbols with no emoji form (unlike ✨, ● or ✕, which many fonts draw as wide,
+# colored emoji), so they line up in any terminal font. Active states animate;
+# `frame` is a free-running counter advanced ten times a second.
+_TWINKLE = "✦✶✷✸✹✸✷✶"  # running: a star twinkling in place
+_GATHER = "⋆∗✧✦✶✦✧∗"  # starting: sparks gathering while it waits to be ready
+_FADE = "✸✶✦✧∗⋆"  # stopping: sparks fading out
+_WAIT = "✧" * 6 + "✦✦" + "✧" * 6 + "⋆⋆"  # scheduled: a slow twinkle until its next run
 
 # Colors are theme variables, so the glyphs follow the app theme (Rosé Pine).
 _GLYPHS: dict[ProcessState, tuple[str, str]] = {
-    ProcessState.STARTING: (_SPINNER, "$accent"),  # waiting for its ready check
-    ProcessState.RUNNING: (_SPINNER, "$success"),
-    ProcessState.STOPPED: ("⠶", "$foreground 45%"),  # solid muted ($text-muted is translucent)
-    ProcessState.STOPPING: (_SPINNER, "$warning"),
+    ProcessState.STARTING: (_GATHER, "$accent"),  # waiting for its ready check
+    ProcessState.RUNNING: (_TWINKLE, "$success"),
+    ProcessState.STOPPED: ("✧", "$foreground 45%"),  # an unlit spark; solid muted color
+    ProcessState.STOPPING: (_FADE, "$warning"),
     ProcessState.CRASHED: ("✗", "$error"),
-    ProcessState.SCHEDULED: (_ORBIT, "$primary"),
+    ProcessState.SCHEDULED: (_WAIT, "$primary"),
 }
 
 

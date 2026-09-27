@@ -333,3 +333,62 @@ async def test_without_a_ready_check_the_process_is_ready_immediately():
     assert proc.state == ProcessState.RUNNING
     assert await proc.wait_ready() is True
     await proc.stop()
+
+
+async def collect(code: str) -> list[str]:
+    proc = ManagedProcess(ProcessConfig(name="p", command=python_command(code)))
+    await proc.start()
+    await proc.wait()
+    await proc._pump_task
+    return list(proc.output)
+
+
+async def test_progress_redraws_collapse_to_the_final_frame():
+    code = (
+        "import sys; out = sys.stdout.buffer; "
+        "out.write('\\ufeffbuilding [  4%] a\\rbuilding [ 50%] b\\rbuilding [100%] c\\n'.encode()); "
+        "out.write(b'\\x1b[2K\\x1b[1Gspin 1\\x1b[2K\\x1b[1Gspin 2\\n'); "
+        "out.write(b'abc\\x08\\x08XY\\r\\n')"
+    )
+    assert await collect(code) == ["building [100%] c", "spin 2", "aXY"]
+
+
+async def test_a_line_longer_than_the_read_buffer_does_not_stop_output():
+    code = "print('x' * 200_000); print('still streaming')"
+    output = await collect(code)
+    assert output[-1] == "still streaming"
+    assert "".join(output[:-1]) == "x" * 200_000
+
+
+async def test_emoji_and_unicode_output_is_preserved():
+    line = "🚀 ✅ ⚠️ 👨‍👩‍👧 日本語 ┌─┐ ⠋ é"
+    code = f"import sys; sys.stdout.buffer.write({line!r}.encode() + b'\\n')"
+    assert await collect(code) == [line]
+
+
+async def test_python_children_are_asked_for_utf8_output(monkeypatch):
+    # On Windows a piped Python child otherwise writes in the console's legacy code
+    # page and crashes on the first emoji it prints.
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    code = "import os, sys; print(os.environ['PYTHONIOENCODING'], sys.stdout.encoding)"
+    assert await collect(code) == ["utf-8 utf-8"]
+
+
+async def test_a_users_own_pythonioencoding_is_respected():
+    proc = ManagedProcess(
+        ProcessConfig(
+            name="p",
+            command=python_command("import os; print(os.environ['PYTHONIOENCODING'])"),
+            env={"PYTHONIOENCODING": "utf-8:backslashreplace"},
+        )
+    )
+    await proc.start()
+    await proc.wait()
+    await proc._pump_task
+    assert list(proc.output) == ["utf-8:backslashreplace"]
+
+
+async def test_non_utf8_output_uses_the_fallback_encoding(monkeypatch):
+    monkeypatch.setattr(process_module, "_FALLBACK_ENCODING", "cp1252")
+    output = await collect("import sys; sys.stdout.buffer.write('café\\n'.encode('cp1252'))")
+    assert output == ["café"]

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/mascot.gif" alt="devp's mascot: a pixel-art bunny in a top hat, swinging a magic wand that throws red sparks, then jumping and twirling it" width="240">
+</p>
+
 # devp
 
 A simple, TOML-configured process multiplexer for your terminal — a lighter-weight
@@ -72,8 +76,8 @@ Like `poetry.lock`, `devp.toml` records which versions it was written for, in a
 
 ```toml
 [devp]
-version = "0.1.0"        # devp version that generated this file
-config-version = "1.0"   # config layout version; devp warns when it doesn't match
+version = "0.2.0"        # devp version that generated this file
+config-version = "1.1"   # config layout version; devp warns when it doesn't match
 ```
 
 `config-version` tracks the *layout* of the file, separately from devp's own
@@ -105,6 +109,7 @@ Each process is a `[[process]]` entry:
 | `autostart`   | no       | boolean                 | `true`           | Whether the process starts automatically when devp launches.      |
 | `autorestart` | no       | boolean                 | `false`          | Automatically restart the process if it crashes (see below).      |
 | `depends_on`  | no       | list of strings         | `[]`             | Other process/cron names that must be running first (see below).  |
+| `shell`       | no       | string or list          | system default   | Shell that runs a string `command` (see below).                   |
 
 **`command` as a string** runs through your shell — use this for anything with
 pipes, `&&`, or shell-specific syntax (`npm run dev`, `uvicorn app:app --reload`).
@@ -115,6 +120,30 @@ between — slightly faster, and immune to shell quoting surprises:
 ```toml
 command = ["python", "worker.py", "--verbose"]
 ```
+
+#### Choosing the shell
+
+String commands run in the system's default shell (`sh`, or `cmd` on Windows) unless
+you pick one, per process or cron job with `shell`, or for everything in a
+`[defaults]` table (a process's own `shell` wins):
+
+```toml
+[defaults]
+shell = "pwsh"                 # every string command runs in PowerShell 7
+
+[[process]]
+name = "api"
+command = "source .venv/bin/activate && uvicorn app:app --reload"
+shell = "bash"                 # this one needs bash
+```
+
+Give a shell's name (found on `PATH`) or its full path. devp passes the command the
+way each shell expects: `-c` for `bash`, `zsh`, `fish`, `sh` and other POSIX-style
+shells, and `-NoLogo -NoProfile -Command` for `pwsh` / `powershell`. For anything
+else, use a list: devp appends the command to it as the last argument, e.g.
+`shell = ["bash", "-lc"]` for a login shell, or `["pwsh", "-Command"]` to load your
+PowerShell profile. If the shell isn't installed, that process fails to start with
+an error saying so. `shell` has no effect on list commands, which never use a shell.
 
 If `devp.toml` is missing or invalid, devp prints a clear message describing what's
 wrong (and where) instead of a stack trace, and exits without launching the TUI.
@@ -243,6 +272,7 @@ schedule = "0 * * * *"   # every hour, on the hour
 | `env`       | no       | table of string→string | `{}`           | Extra environment variables for each run.                          |
 | `enabled`   | no       | boolean              | `true`           | Whether the schedule is active on launch (like a process's `autostart`). |
 | `depends_on`| no       | list of strings      | `[]`             | Other process/cron names that must be running first (see above).  |
+| `shell`     | no       | string or list       | system default   | Shell for a string `command`, as for processes (see above).        |
 
 Each run's output is appended to the job's log, with a separator line marking where
 it started, so you can scroll back through the history of previous runs. If a
@@ -275,17 +305,18 @@ exactly the keys that work where you are; press `?` for the full list.
 With the mouse, click a process to select it, and **double-click** it to run it
 (the same as pressing `s`).
 
-devp uses the [Rosé Pine](https://rosepinetheme.com/) color theme. Each item in the
-sidebar shows a status glyph. They're plain braille/text characters (not emoji), so
-they line up in any terminal font; active states animate:
+Each item in the sidebar shows a status glyph: the sparks from the mascot's magic
+wand. They're plain text symbols (not emoji), so they line up in any terminal font;
+active states animate:
 
-- `⠋` rose spinner — starting (waiting for its `ready_when` / `ready_port` check)
-- `⠋` foam spinner — running
-- `⠶` muted — stopped
-- `⠋` gold spinner — stopping
-- `✗` love (red) — crashed or failed to start
-- `⠁` iris orbiting dot — a cron job, enabled and waiting for its next run (shown
-  with a live countdown that ticks down every second, e.g. `⠁ backup (next in 5m12s)`)
+- `✦` pink, gathering — starting (waiting for its `ready_when` / `ready_port` check)
+- `✶` cyan, twinkling — running
+- `✸` yellow, fading — stopping
+- `✧` grey — stopped
+- `✗` red — crashed or failed to start
+- `✧` purple, twinkling slowly — a cron job, enabled and waiting for its next run
+  (shown with a live countdown that ticks down every second, e.g.
+  `✧ backup (next in 5m12s)`)
 
 Pressing `s` on a cron job triggers an immediate one-off run, independent of its
 schedule — handy for testing a job without waiting for it to come due.
@@ -316,7 +347,13 @@ where one is installed, your system's clipboard tool (`pbcopy`, `clip`, `wl-copy
 
 Selecting a process shows its full scrollback in the log pane on the right, and new
 output keeps streaming in live, in the colors the process printed it with (color
-codes are shown as colors; search and copy work on the plain text). If a process crashes or fails to start, you'll see
+codes are shown as colors; search and copy work on the plain text).
+Emoji, CJK text, box drawing, and Nerd Font glyphs are shown at their real width.
+Progress bars and spinners that redraw a line in place (with `\r`) show their final
+state, e.g. `[100%] done`, instead of every intermediate frame, and output that
+isn't UTF-8 is decoded with the system's legacy encoding on Windows. Python
+processes are started with `PYTHONIOENCODING=utf-8` (unless you set it yourself),
+so printing an emoji can't crash them on Windows. If a process crashes or fails to start, you'll see
 an error toast explaining why, in addition to the sidebar turning red.
 
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
