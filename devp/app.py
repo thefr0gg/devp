@@ -5,19 +5,23 @@ from __future__ import annotations
 from datetime import datetime
 
 from rich.markup import escape
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Input, Label, ListItem, ListView, RichLog
+from textual.timer import Timer
+from textual.widgets import Footer, Input, Label, ListItem, ListView
 
 from devp.cron import CronJob
+from devp.log_view import LogView
 from devp.manager import ProcessManager
-from devp.messages import LogLine, ProcessError, ProcessStateChanged
-from devp.process import ProcessState
-from devp.widgets import format_duration, status_label
+from devp.messages import ProcessError, ProcessStateChanged
+from devp.process import MAX_BUFFER_LINES, ProcessState
+from devp.widgets import format_duration, is_animated, status_label
 
-_MATCH_STYLE = "black on yellow"
-_CRON_TICK_INTERVAL = 1.0
+# How often animated sidebar glyphs advance a frame (also ticks cron countdowns).
+_GLYPH_FRAME_INTERVAL = 0.1
+# Output is buffered and written to the log pane in batches at most this often, so a
+# chatty process costs one render per frame instead of one message + render per line.
+_LOG_FLUSH_INTERVAL = 1 / 30
 
 
 def _status_detail(runnable: object) -> str | None:
@@ -36,8 +40,17 @@ class ProcessListItem(ListItem):
     """A sidebar row that remembers which process it represents."""
 
     def __init__(self, process_name: str, state: ProcessState, detail: str | None = None) -> None:
-        super().__init__(Label(status_label(process_name, state, detail)))
+        self.label_text = status_label(process_name, state, detail)
+        self.label = Label(self.label_text)
+        super().__init__(self.label)
         self.process_name = process_name
+
+    def set_status(self, state: ProcessState, detail: str | None = None, frame: int = 0) -> None:
+        """Update the row's label, skipping the refresh when nothing visible changed."""
+        text = status_label(self.process_name, state, detail, frame)
+        if text != self.label_text:
+            self.label_text = text
+            self.label.update(text)
 
 
 class DevpApp(App[None]):
@@ -109,6 +122,8 @@ class DevpApp(App[None]):
     }
     """
 
+    ENABLE_COMMAND_PALETTE = False
+
     BINDINGS = [
         ("s", "start_selected", "Run"),
         ("x", "stop_selected", "Stop"),
@@ -133,10 +148,12 @@ class DevpApp(App[None]):
         self.selected_name: str | None = self._process_names[0] if self._process_names else None
         self._list_items: dict[str, ProcessListItem] = {}
         self._search_query = ""
-        self._log_row_count = 0
-        self._search_matches: list[int] = []
-        self._search_cursor = -1
+        self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
+        self._pending_lines: list[str] = []
+        self._glyph_frame = 0
+        self._flush_timer: Timer | None = None
+        self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
 
     def compose(self) -> ComposeResult:
         """Lay out the sidebar (process list) and the log pane side by side."""
@@ -149,7 +166,7 @@ class DevpApp(App[None]):
                 items.append(item)
             yield ListView(*items, id="sidebar")
             with Vertical(id="log-pane"):
-                yield RichLog(id="log", wrap=True, markup=False)
+                yield self._log_view
                 yield Input(placeholder="› search logs", id="search-input")
         yield Footer()
 
@@ -160,21 +177,47 @@ class DevpApp(App[None]):
         sidebar.border_title = "Processes"
         sidebar.focus()
         self._refresh_log_pane()
-        self.set_interval(_CRON_TICK_INTERVAL, self._tick_cron_labels)
+        self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
         await self.manager.autostart()
 
-    def _tick_cron_labels(self) -> None:
-        """Refresh every cron job's sidebar label so its 'next run' countdown ticks live."""
+    def _tick_sidebar(self) -> None:
+        """Advance animated status glyphs and keep cron 'next run' countdowns live.
+
+        Only rows whose glyph animates, or that show a countdown, are recomputed, and
+        `set_status` skips the redraw when the label text hasn't changed.
+        """
+        self._glyph_frame += 1
         for name, item in self._list_items.items():
             runnable = self.manager.processes[name]
-            if isinstance(runnable, CronJob):
-                item.query_one(Label).update(
-                    status_label(name, runnable.state, _status_detail(runnable))
-                )
+            state = runnable.state
+            if is_animated(state) or isinstance(runnable, CronJob):
+                item.set_status(state, _status_detail(runnable), self._glyph_frame)
 
     def _on_output(self, process_name: str, line: str) -> None:
-        """Forward a process's output line into the app's message queue (thread-safe hop)."""
-        self.post_message(LogLine(process_name, line))
+        """Queue a line of the selected process's output for the next batched log write.
+
+        Other processes' output needs no UI work: it's already in their scrollback
+        buffer and gets replayed when they're selected.
+        """
+        if process_name != self.selected_name:
+            return
+        self._pending_lines.append(line)
+        if self._flush_timer is None:
+            self._flush_timer = self.set_timer(_LOG_FLUSH_INTERVAL, self._flush_pending_lines)
+
+    def _flush_pending_lines(self) -> None:
+        """Write all queued output lines to the log pane in one go."""
+        self._flush_timer = None
+        lines, self._pending_lines = self._pending_lines, []
+        if self._log_view.is_attached:  # the timer can fire during shutdown
+            self._log_view.write_lines(lines)
+
+    def _discard_pending_lines(self) -> None:
+        """Drop queued lines (e.g. before a full replay, which already includes them)."""
+        if self._flush_timer is not None:
+            self._flush_timer.stop()
+            self._flush_timer = None
+        self._pending_lines = []
 
     def _on_state_change(self, process_name: str, state: ProcessState) -> None:
         """Forward a process's state change into the app's message queue."""
@@ -184,18 +227,13 @@ class DevpApp(App[None]):
         """Forward a process error into the app's message queue."""
         self.post_message(ProcessError(process_name, text))
 
-    def on_log_line(self, message: LogLine) -> None:
-        """Append the line to the log pane if it belongs to the currently selected process."""
-        if message.process_name == self.selected_name:
-            self._write_log_line(message.line)
-
     def on_process_state_changed(self, message: ProcessStateChanged) -> None:
         """Refresh the sidebar glyph and show a brief toast for the new state."""
         item = self._list_items.get(message.process_name)
         if item is not None:
             runnable = self.manager.processes.get(message.process_name)
             detail = _status_detail(runnable) if runnable is not None else None
-            item.query_one(Label).update(status_label(message.process_name, message.state, detail))
+            item.set_status(message.state, detail, self._glyph_frame)
 
         name = escape(message.process_name)
         if message.state == ProcessState.RUNNING:
@@ -225,26 +263,13 @@ class DevpApp(App[None]):
         self.query_one("#log-pane").border_title = (
             f"Logs · {escape(self.selected_name)}" if self.selected_name else "Logs"
         )
-        log = self.query_one("#log", RichLog)
+        self._discard_pending_lines()
+        log = self._log_view
         log.clear()
-        self._log_row_count = 0
-        self._search_matches = []
-        self._search_cursor = -1
-        if self.selected_name is None:
-            return
-        process = self.manager.processes[self.selected_name]
-        for line in process.output:
-            self._write_log_line(line)
-
-    def _write_log_line(self, line: str) -> None:
-        """Write one line to the log pane, highlighting it if it matches the active search."""
-        log = self.query_one("#log", RichLog)
-        if self._search_query and self._search_query.lower() in line.lower():
-            self._search_matches.append(self._log_row_count)
-            log.write(Text(line, style=_MATCH_STYLE))
-        else:
-            log.write(line)
-        self._log_row_count += 1
+        log.set_highlight(self._search_query)
+        self._search_cursor = None
+        if self.selected_name is not None:
+            log.write_lines(self.manager.processes[self.selected_name].output)
 
     def action_search(self) -> None:
         """Open the search bar for the currently selected process's log (bound to '/')."""
@@ -270,7 +295,7 @@ class DevpApp(App[None]):
         target = self._pre_search_focus
         self._pre_search_focus = None
         if focus_log:
-            self.query_one("#log", RichLog).focus()
+            self._log_view.focus()
         elif target is not None:
             target.focus()
         else:
@@ -285,16 +310,18 @@ class DevpApp(App[None]):
         self._close_search_input(focus_log=True)
 
         self._search_query = query
-        self._refresh_log_pane()
+        self._search_cursor = None
+        log = self._log_view
+        log.set_highlight(query)
 
         if not query:
             return
 
-        if self._search_matches:
-            self._search_cursor = 0
-            self._scroll_to_current_match()
+        matches = log.find(query)
+        if matches:
+            self._jump_to_match(matches[0])
             self.notify(
-                f"{len(self._search_matches)} match(es) for '{escape(query)}'",
+                f"{len(matches)} match(es) for '{escape(query)}'",
                 severity="information",
                 timeout=3,
             )
@@ -302,22 +329,26 @@ class DevpApp(App[None]):
             self.notify(f"No matches for '{escape(query)}'", severity="warning", timeout=3)
 
     def action_next_match(self) -> None:
-        """Jump to the next search match (bound to 'n')."""
-        if not self._search_matches:
+        """Jump to the next search match (bound to 'n'), wrapping around at the end."""
+        matches = self._log_view.find(self._search_query)
+        if not matches:
             return
-        self._search_cursor = (self._search_cursor + 1) % len(self._search_matches)
-        self._scroll_to_current_match()
+        cursor = self._search_cursor
+        later = [m for m in matches if cursor is None or m > cursor]
+        self._jump_to_match(later[0] if later else matches[0])
 
     def action_prev_match(self) -> None:
-        """Jump to the previous search match (bound to 'N')."""
-        if not self._search_matches:
+        """Jump to the previous search match (bound to 'N'), wrapping around at the start."""
+        matches = self._log_view.find(self._search_query)
+        if not matches:
             return
-        self._search_cursor = (self._search_cursor - 1) % len(self._search_matches)
-        self._scroll_to_current_match()
+        cursor = self._search_cursor
+        earlier = [m for m in matches if cursor is None or m < cursor]
+        self._jump_to_match(earlier[-1] if earlier else matches[-1])
 
-    def _scroll_to_current_match(self) -> None:
-        row = self._search_matches[self._search_cursor]
-        self.query_one("#log", RichLog).scroll_to(y=row, animate=False)
+    def _jump_to_match(self, index: int) -> None:
+        self._search_cursor = index
+        self._log_view.scroll_to_line(index)
 
     def action_close_search(self) -> None:
         """Close the search bar and clear any active search highlighting (bound to Escape)."""
@@ -327,7 +358,8 @@ class DevpApp(App[None]):
         self._close_search_input()
         if self._search_query:
             self._search_query = ""
-            self._refresh_log_pane()
+            self._search_cursor = None
+            self._log_view.set_highlight("")
 
     async def action_start_selected(self) -> None:
         """Start the currently selected process (bound to 's')."""

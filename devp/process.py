@@ -14,7 +14,7 @@ from enum import Enum, auto
 from devp.config import ProcessConfig
 
 _IS_WINDOWS = sys.platform == "win32"
-_MAX_BUFFER_LINES = 5000
+MAX_BUFFER_LINES = 5000
 _STOP_TIMEOUT = 5.0
 _BASE_RESTART_DELAY = 1.0
 _MAX_RESTART_DELAY = 30.0
@@ -65,7 +65,7 @@ class ManagedProcess:
         self.state = ProcessState.STOPPED
         self.exit_code: int | None = None
         self.last_error: str | None = None
-        self.output: deque[str] = deque(maxlen=_MAX_BUFFER_LINES)
+        self.output: deque[str] = deque(maxlen=MAX_BUFFER_LINES)
         self._proc: asyncio.subprocess.Process | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._wait_task: asyncio.Task[None] | None = None

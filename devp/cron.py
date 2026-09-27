@@ -6,8 +6,6 @@ import asyncio
 from collections import deque
 from datetime import datetime
 
-from croniter import croniter
-
 from devp.config import CronConfig, ProcessConfig
 from devp.process import ErrorCallback, ManagedProcess, OutputCallback, ProcessState, StateCallback
 
@@ -73,6 +71,8 @@ class CronJob:
             self._on_state_change(self.config.name, self.state)
 
     def _compute_next_run(self) -> datetime:
+        from croniter import croniter  # deferred: only needed when crons are configured
+
         return croniter(self.config.schedule, datetime.now()).get_next(datetime)
 
     async def start_schedule(self) -> None:

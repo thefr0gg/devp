@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from croniter import croniter
-
 
 class ConfigError(Exception):
     """Raised when devp.toml is missing or fails validation."""
@@ -133,6 +131,8 @@ def _parse_cron(entry: dict[str, Any], location: str, seen_names: set[str]) -> C
     schedule = entry.get("schedule")
     if not isinstance(schedule, str) or not schedule.strip():
         raise ConfigError(f"{location} ('{name}'): 'schedule' is required and must be a string")
+    from croniter import croniter  # deferred: only needed when crons are configured
+
     if not croniter.is_valid(schedule):
         raise ConfigError(f"{location} ('{name}'): '{schedule}' is not a valid cron schedule")
 
