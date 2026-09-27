@@ -18,6 +18,7 @@ class ProcessManager:
         self.processes: dict[str, Runnable] = {}
         self._process_configs = config.processes
         self._cron_configs = config.crons
+        self._on_error: ErrorCallback | None = None
 
     def build(
         self,
@@ -26,6 +27,7 @@ class ProcessManager:
         on_error: ErrorCallback | None = None,
     ) -> None:
         """Create a `ManagedProcess`/`CronJob` for each configured entry, wired to the callbacks."""
+        self._on_error = on_error
         for process_config in self._process_configs:
             self.processes[process_config.name] = ManagedProcess(
                 process_config,
@@ -44,25 +46,44 @@ class ProcessManager:
     async def autostart(self) -> None:
         """Start every autostart process and cron schedule, waiting for `depends_on` first.
 
+        A dependency counts as started once it's *ready*: immediately after spawning,
+        or, with `ready_when`/`ready_port`, once that check passes. If a dependency
+        exits first or its check times out, its dependents are left stopped (with a
+        note in their log) rather than started against something that isn't up.
+
         Config validation already guarantees every `depends_on` reference exists, is
         itself autostarted, and forms no cycle, so this can simply wait on a per-name
         event rather than compute an explicit topological order.
         """
-        started = {name: asyncio.Event() for name in self.processes}
+        settled = {name: asyncio.Event() for name in self.processes}
+        ready: dict[str, bool] = {}
 
         async def start_one(name: str) -> None:
             runnable = self.processes[name]
-            for dep in runnable.config.depends_on:
-                await started[dep].wait()
+            ready[name] = False
             try:
-                if isinstance(runnable, CronJob):
+                for dep in runnable.config.depends_on:
+                    await settled[dep].wait()
+                not_ready = [dep for dep in runnable.config.depends_on if not ready[dep]]
+                if not_ready:
+                    self._skip_start(runnable, not_ready)
+                elif isinstance(runnable, CronJob):
                     await runnable.start_schedule()
+                    ready[name] = True
                 elif runnable.config.autostart:
                     await runnable.start()
+                    ready[name] = await runnable.wait_ready()
             finally:
-                started[name].set()
+                settled[name].set()
 
         await asyncio.gather(*(start_one(name) for name in self.processes))
+
+    def _skip_start(self, runnable: Runnable, not_ready: list[str]) -> None:
+        deps = ", ".join(f"'{dep}'" for dep in not_ready)
+        reason = f"not started: {deps} didn't become ready"
+        runnable.log(f"--- {reason} (press s to start it anyway) ---")
+        if self._on_error is not None:
+            self._on_error(runnable.config.name, reason)
 
     async def shutdown_all(self) -> None:
         """Stop every process/run and cron schedule, stopping dependents before their dependencies."""

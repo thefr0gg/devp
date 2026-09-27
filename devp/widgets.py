@@ -14,6 +14,7 @@ _ORBIT = "⠁⠈⠐⠠⢀⡀⠄⠂"
 
 # Colors are theme variables, so the glyphs follow the app theme (Rosé Pine).
 _GLYPHS: dict[ProcessState, tuple[str, str]] = {
+    ProcessState.STARTING: (_SPINNER, "$accent"),  # waiting for its ready check
     ProcessState.RUNNING: (_SPINNER, "$success"),
     ProcessState.STOPPED: ("⠶", "$foreground 45%"),  # solid muted ($text-muted is translucent)
     ProcessState.STOPPING: (_SPINNER, "$warning"),

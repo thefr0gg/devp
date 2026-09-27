@@ -56,11 +56,15 @@ class CronJob:
 
     @property
     def state(self) -> ProcessState:
-        """RUNNING/CRASHED pass through; otherwise SCHEDULED if enabled, else STOPPED."""
+        """STARTING/RUNNING/CRASHED pass through; otherwise SCHEDULED if enabled, else STOPPED."""
         inner = self._process.state
-        if inner in (ProcessState.RUNNING, ProcessState.CRASHED):
+        if inner in (ProcessState.STARTING, ProcessState.RUNNING, ProcessState.CRASHED):
             return inner
         return ProcessState.SCHEDULED if self.enabled else ProcessState.STOPPED
+
+    def log(self, line: str) -> None:
+        """Append a line to this job's output buffer."""
+        self._process.log(line)
 
     def _handle_inner_state_change(self, _name: str, _inner_state: ProcessState) -> None:
         """Re-emit the wrapped process's state change as this job's own (translated) state."""
@@ -116,7 +120,7 @@ class CronJob:
 
     async def start(self) -> None:
         """Manually trigger a run right now, independent of the schedule."""
-        if self._process.state != ProcessState.RUNNING:
+        if self._process.state not in (ProcessState.RUNNING, ProcessState.STARTING):
             self._process.log(f"--- manual run starting at {datetime.now():%H:%M:%S} ---")
         await self._process.start()
 

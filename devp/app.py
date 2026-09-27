@@ -14,6 +14,7 @@ from textual.message import Message
 from textual.notifications import Notify
 from textual.timer import Timer
 from textual.widgets import Footer, Input, Label, ListItem, ListView
+from textual.worker import Worker
 
 from devp.clipboard import copy_native
 from devp.cron import CronJob
@@ -189,6 +190,7 @@ class DevpApp(App[None]):
         self._search_cursor: int | None = None  # log line index of the current match
         self._pre_search_focus = None
         self._pending_lines: list[str] = []
+        self._autostart: Worker[None] | None = None
         self._glyph_frame = 0
         self._flush_timer: Timer | None = None
         self._log_view = LogView(max_lines=MAX_BUFFER_LINES, id="log")
@@ -238,7 +240,8 @@ class DevpApp(App[None]):
         sidebar.focus()
         self._refresh_log_pane()
         self.set_interval(_GLYPH_FRAME_INTERVAL, self._tick_sidebar)
-        await self.manager.autostart()
+        # In the background: waiting on dependencies' ready checks mustn't block the UI.
+        self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
 
     def _tick_sidebar(self) -> None:
         """Advance animated status glyphs and keep cron 'next run' countdowns live.
@@ -297,7 +300,10 @@ class DevpApp(App[None]):
 
         name = escape(message.process_name)
         if message.state == ProcessState.RUNNING:
-            self.notify(f"'{name}' started", severity="information", timeout=3)
+            runnable = self.manager.processes.get(message.process_name)
+            has_check = runnable is not None and getattr(runnable.config, "has_ready_check", False)
+            verb = "is ready" if has_check else "started"
+            self.notify(f"'{name}' {verb}", severity="information", timeout=3)
         elif message.state == ProcessState.STOPPED:
             self.notify(f"'{name}' stopped", severity="information", timeout=3)
 
@@ -479,5 +485,7 @@ class DevpApp(App[None]):
 
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""
+        if self._autostart is not None:
+            self._autostart.cancel()  # don't let a pending start spawn after shutdown
         await self.manager.shutdown_all()
         self.exit()

@@ -284,3 +284,38 @@ async def test_uses_the_rose_pine_theme():
         await pilot.pause()
         assert app.theme == "rose-pine"
         await app.manager.shutdown_all()
+
+
+async def test_ui_stays_responsive_while_waiting_for_a_dependency_to_be_ready():
+    config = Config(
+        processes=[
+            ProcessConfig(
+                name="db",
+                command=python_command("import time; time.sleep(1.5); print('up'); time.sleep(30)"),
+                ready_when="up",
+            ),
+            ProcessConfig(
+                name="api",
+                command=python_command("import time; time.sleep(30)"),
+                depends_on=["db"],
+            ),
+        ],
+        crons=[],
+    )
+    app = DevpApp(ProcessManager(config))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.manager.processes["db"].state == ProcessState.STARTING
+
+        await pilot.press("down")  # handled right away, not after db becomes ready
+        await pilot.pause()
+        assert app.selected_name == "api"
+        assert app.manager.processes["db"].state == ProcessState.STARTING
+
+        for _ in range(60):
+            if app.manager.processes["api"].state == ProcessState.RUNNING:
+                break
+            await asyncio.sleep(0.05)
+        assert app.manager.processes["api"].state == ProcessState.RUNNING
+
+        await app.manager.shutdown_all()

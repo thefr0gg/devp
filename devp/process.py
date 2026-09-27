@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -12,6 +14,7 @@ from collections import deque
 from collections.abc import Callable
 from enum import Enum, auto
 
+from devp.ansi import strip_ansi
 from devp.config import ProcessConfig
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -22,6 +25,7 @@ _MAX_RESTART_DELAY = 30.0
 # A crash after at least this much uptime starts the autorestart backoff over, so a
 # process that crashes once in a long while isn't treated like a crash loop.
 STABLE_UPTIME = 30.0
+_PORT_POLL_INTERVAL = 0.25
 
 OutputCallback = Callable[[str, str], None]
 StateCallback = Callable[[str, "ProcessState"], None]
@@ -46,6 +50,7 @@ class ProcessState(Enum):
     """Lifecycle states of a single managed process or cron job."""
 
     STOPPED = auto()
+    STARTING = auto()  # spawned, waiting for its ready_when / ready_port check to pass
     RUNNING = auto()
     STOPPING = auto()
     CRASHED = auto()
@@ -76,6 +81,9 @@ class ManagedProcess:
         self._restart_task: asyncio.Task[None] | None = None
         self._crash_count = 0
         self._started_at = 0.0
+        self._ready: asyncio.Future[bool] | None = None
+        self._ready_task: asyncio.Task[None] | None = None
+        self._ready_pattern = re.compile(config.ready_when) if config.ready_when else None
 
     def _set_state(self, state: ProcessState) -> None:
         """Update state and notify `on_state_change`, if set."""
@@ -107,7 +115,7 @@ class ManagedProcess:
         A failure to spawn (e.g. missing executable) is reported as a CRASHED state
         rather than raised, so callers don't need to guard every call site.
         """
-        if self.state == ProcessState.RUNNING:
+        if self.state in (ProcessState.RUNNING, ProcessState.STARTING):
             return
 
         if self._restart_task is not None:
@@ -140,15 +148,76 @@ class ManagedProcess:
                     *self.config.command, **popen_kwargs
                 )
         except OSError as exc:
+            self._ready = asyncio.get_running_loop().create_future()
+            self._ready.set_result(False)
             self._set_state(ProcessState.CRASHED)
             self._report_error(f"failed to start: {exc}")
             return
 
         self.exit_code = None
         self._started_at = time.monotonic()
-        self._set_state(ProcessState.RUNNING)
+        self._ready = asyncio.get_running_loop().create_future()
+        if self.config.has_ready_check:
+            self._set_state(ProcessState.STARTING)
+            self._ready_task = asyncio.create_task(self._check_readiness())
+        else:
+            self._ready.set_result(True)
+            self._set_state(ProcessState.RUNNING)
         self._pump_task = asyncio.create_task(self._pump_output())
         self._wait_task = asyncio.create_task(self._await_exit())
+
+    async def wait_ready(self) -> bool:
+        """Wait until the current run is ready to serve its dependents.
+
+        A process without a `ready_when`/`ready_port` check is ready as soon as it
+        spawns. Returns False if the run failed to start, exited before becoming
+        ready, or didn't pass its check within `ready_timeout`.
+        """
+        if self._ready is None:
+            return False
+        return await asyncio.shield(self._ready)
+
+    def _settle_ready(self, ready: bool) -> None:
+        if self._ready is not None and not self._ready.done():
+            self._ready.set_result(ready)
+
+    def _mark_ready(self) -> None:
+        """The readiness check passed: move from STARTING to RUNNING."""
+        if self.state == ProcessState.STARTING:
+            self._settle_ready(True)
+            self._set_state(ProcessState.RUNNING)
+
+    async def _check_readiness(self) -> None:
+        """Poll `ready_port` (or just wait for `ready_when` to match), up to `ready_timeout`."""
+        assert self._ready is not None
+        timeout = self.config.ready_timeout
+        try:
+            if self.config.ready_port is not None:
+                await asyncio.wait_for(self._wait_for_port(self.config.ready_port), timeout)
+                self._mark_ready()
+            else:
+                await asyncio.wait_for(asyncio.shield(self._ready), timeout)
+        except asyncio.TimeoutError:
+            if self.state == ProcessState.STARTING:
+                self.log(f"--- no ready signal after {timeout:g}s ---")
+                self._settle_ready(False)
+                self._set_state(ProcessState.RUNNING)
+                self._report_error(f"no ready signal after {timeout:g}s")
+        except asyncio.CancelledError:
+            pass
+
+    @staticmethod
+    async def _wait_for_port(port: int) -> None:
+        while True:
+            try:
+                _, writer = await asyncio.open_connection("localhost", port)
+            except OSError:
+                await asyncio.sleep(_PORT_POLL_INTERVAL)
+                continue
+            writer.close()
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+            return
 
     async def _pump_output(self) -> None:
         """Read the process's merged stdout/stderr line by line into the scrollback buffer."""
@@ -160,6 +229,12 @@ class ManagedProcess:
                 self.output.append(line)
                 if self.on_output is not None:
                     self.on_output(self.config.name, line)
+                if (
+                    self._ready_pattern is not None
+                    and self.state == ProcessState.STARTING
+                    and self._ready_pattern.search(strip_ansi(line))
+                ):
+                    self._mark_ready()
         except asyncio.CancelledError:
             pass
 
@@ -168,6 +243,10 @@ class ManagedProcess:
         assert self._proc is not None
         returncode = await self._proc.wait()
         self.exit_code = returncode
+        self._settle_ready(False)  # exited before its readiness check passed
+        if self._ready_task is not None:
+            self._ready_task.cancel()
+            self._ready_task = None
         if self.state == ProcessState.STOPPING:
             self._set_state(ProcessState.STOPPED)
         elif returncode == 0:
@@ -206,7 +285,11 @@ class ManagedProcess:
             self._restart_task.cancel()
             self._restart_task = None
 
-        if self._proc is None or self.state not in (ProcessState.RUNNING, ProcessState.STOPPING):
+        if self._proc is None or self.state not in (
+            ProcessState.STARTING,
+            ProcessState.RUNNING,
+            ProcessState.STOPPING,
+        ):
             return
 
         self._set_state(ProcessState.STOPPING)

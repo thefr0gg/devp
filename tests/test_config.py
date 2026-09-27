@@ -332,3 +332,42 @@ def test_duplicate_name_across_process_and_cron_rejected(tmp_path):
     )
     with pytest.raises(ConfigError, match="duplicate"):
         load_config(path)
+
+
+def test_ready_checks_parse(tmp_path):
+    path = write_config(
+        tmp_path,
+        """
+        [[process]]
+        name = "api"
+        command = "run-api"
+        ready_when = "listening on :\\\\d+"
+        ready_timeout = 10
+
+        [[process]]
+        name = "db"
+        command = "run-db"
+        ready_port = 5432
+        """,
+    )
+    api, db = load_config(path).processes
+    assert api.ready_when == r"listening on :\d+"
+    assert api.ready_timeout == 10.0
+    assert db.ready_port == 5432 and db.ready_timeout == 60.0
+    assert api.has_ready_check and db.has_ready_check
+
+
+@pytest.mark.parametrize(
+    ("snippet", "message"),
+    [
+        ('ready_when = "x"\nready_port = 80', "not both"),
+        ('ready_when = "("', "not a valid regular expression"),
+        ("ready_port = 70000", "port number"),
+        ('ready_port = "80"', "port number"),
+        ("ready_timeout = 0", "positive number"),
+    ],
+)
+def test_invalid_ready_checks_rejected(tmp_path, snippet, message):
+    path = write_config(tmp_path, f'[[process]]\nname = "api"\ncommand = "x"\n{snippet}\n')
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)

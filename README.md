@@ -114,6 +114,38 @@ loads `devp.toml`: an unknown name, a dependency on something that doesn't autos
 (it would never actually satisfy the dependency), or a circular `depends_on` are all
 rejected up front with a clear error, rather than surfacing as a runtime hang.
 
+#### Waiting until a dependency is ready
+
+By default a dependency counts as started as soon as its process has spawned, which
+is often before it can actually accept work. Add a readiness check to make its
+dependents wait until it's really up:
+
+```toml
+[[process]]
+name = "db"
+command = "docker run --rm -p 5432:5432 postgres"
+ready_port = 5432            # ready once localhost:5432 accepts connections
+
+[[process]]
+name = "api"
+command = "uvicorn app:app --reload"
+depends_on = ["db"]
+ready_when = "Application startup complete"   # ready once a line matches this regex
+ready_timeout = 30           # seconds; default 60
+```
+
+| Key             | Type    | Default | Description                                                        |
+|-----------------|---------|---------|--------------------------------------------------------------------|
+| `ready_when`    | string  | —       | A regular expression; ready once an output line matches it (color codes are ignored). |
+| `ready_port`    | integer | —       | Ready once something accepts TCP connections on this port on localhost. |
+| `ready_timeout` | number  | `60`    | How long to wait for the check before giving up.                   |
+
+Use one of `ready_when` or `ready_port`, not both. Until its check passes, a process
+shows a rose spinner in the sidebar (“starting”), then switches to the usual running
+spinner with an “is ready” toast. If it exits before becoming ready, or the timeout
+passes, the processes that depend on it are left stopped, with a note in their log
+explaining why. You can still start them yourself with `s`.
+
 ### Cron jobs
 
 A `[[cron]]` entry runs a command on a recurring schedule instead of continuously,
@@ -163,6 +195,7 @@ devp uses the [Rosé Pine](https://rosepinetheme.com/) color theme. Each item in
 sidebar shows a status glyph. They're plain braille/text characters (not emoji), so
 they line up in any terminal font; active states animate:
 
+- `⠋` rose spinner — starting (waiting for its `ready_when` / `ready_port` check)
 - `⠋` foam spinner — running
 - `⠶` muted — stopped
 - `⠋` gold spinner — stopping
