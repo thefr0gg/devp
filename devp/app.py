@@ -22,7 +22,8 @@ from textual.screen import ModalScreen
 from textual.worker import Worker
 
 from devp.clipboard import copy_native
-from devp.config import Config, ConfigError, load_config
+from devp.api import API_FILE_NAME, ControlServer
+from devp.config import Config, ConfigError, file_stamp, load_config
 from devp.cron import CronJob
 from devp.log_view import LogView
 from devp.manager import ProcessManager
@@ -43,21 +44,15 @@ _TOAST_ROWS = 4
 _CONFIG_POLL_INTERVAL = 1.0
 
 
-def _file_stamp(path: Path | None) -> tuple[int, int] | None:
-    """A cheap fingerprint of a file (mtime, size) to notice it being saved."""
-    if path is None:
-        return None
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return (stat.st_mtime_ns, stat.st_size)
+def _is_cron(runnable: object) -> bool:
+    """A cron job, local or (in `devp attach`) a remote stand-in for one."""
+    return isinstance(runnable, CronJob) or getattr(runnable, "is_cron", False)
 
 
 def _status_detail(runnable: object) -> str | None:
     """Show a live countdown to a cron job's next scheduled run, when it's idle and enabled."""
     if (
-        isinstance(runnable, CronJob)
+        _is_cron(runnable)
         and runnable.state == ProcessState.SCHEDULED
         and runnable.next_run_at is not None
     ):
@@ -76,7 +71,7 @@ def _log_title(name: str | None, runnable: object | None) -> str:
     if pid is not None:
         details += [f"pid {pid}", f"up {format_duration(runnable.uptime or 0)}"]
         restarts = runnable.start_count - 1
-        if restarts > 0 and not isinstance(runnable, CronJob):
+        if restarts > 0 and not _is_cron(runnable):
             details.append(f"restarts {restarts}")
     elif runnable.exit_code is not None:
         details.append(f"exit {runnable.exit_code}")
@@ -266,7 +261,12 @@ class DevpApp(App[None]):
         "quit": frozenset({"processes", "log"}),
     }
 
-    def __init__(self, manager: ProcessManager, config_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        manager: ProcessManager,
+        config_path: Path | None = None,
+        enable_api: bool = True,
+    ) -> None:
         # ansi_color: draw the base background and text in the terminal's *default*
         # colors instead of painting the theme's. Terminals pad the character grid with
         # a margin no app can draw in, filled with that default background, so painting
@@ -282,7 +282,12 @@ class DevpApp(App[None]):
         self.manager = manager
         self._wire(manager)
         self._config_path = config_path
-        self._config_stamp = _file_stamp(config_path)
+        self._api = (
+            ControlServer(lambda: self.manager, self.action_quit, self._cancel_autostart)
+            if enable_api and config_path is not None
+            else None
+        )
+        self._config_stamp = file_stamp(config_path)
         self._reloading = False
         self._process_names = list(manager.processes.keys())
         self.selected_name: str | None = self._process_names[0] if self._process_names else None
@@ -406,6 +411,12 @@ class DevpApp(App[None]):
         self._show_config_warnings()
         # In the background: waiting on dependencies' ready checks mustn't block the UI.
         self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+        if self._api is not None:
+            try:
+                await self._api.start(self._config_path.parent / API_FILE_NAME)
+            except OSError as exc:
+                self._api = None
+                self.notify(f"Control API unavailable: {exc}", severity="warning", timeout=6)
 
     def _use_theme_as_terminal_colors(self) -> None:
         """Set the terminal's default background and text colors to the theme's until exit.
@@ -419,11 +430,20 @@ class DevpApp(App[None]):
             foreground = _osc_color(self.theme_variables["foreground"])
             self._driver.write(f"\x1b]11;{background}\x07\x1b]10;{foreground}\x07")
 
-    def on_unmount(self) -> None:
-        # Runs on every exit path, while the terminal is still ours: restore the
-        # terminal's own default colors (OSC 111 / OSC 110).
-        if self._driver is not None:
-            self._driver.write("\x1b]111\x07\x1b]110\x07")
+    async def on_unmount(self) -> None:
+        # Runs on every exit path (quit, SIGTERM/SIGHUP, an error), so processes are
+        # never left running even when `action_quit` wasn't what ended the app. It's a
+        # no-op for anything already stopped.
+        try:
+            if self._api is not None:
+                await self._api.stop()
+            self._cancel_autostart()
+            await self.manager.shutdown_all()
+        finally:
+            # While the terminal is still ours: restore its own default colors
+            # (OSC 111 / OSC 110).
+            if self._driver is not None:
+                self._driver.write("\x1b]111\x07\x1b]110\x07")
 
     def _update_log_title(self) -> None:
         if not self._log_pane.is_attached:  # the sidebar timer can fire during shutdown
@@ -450,7 +470,7 @@ class DevpApp(App[None]):
         for name, item in self._list_items.items():
             runnable = self.manager.processes[name]
             state = runnable.state
-            if is_animated(state) or isinstance(runnable, CronJob):
+            if is_animated(state) or _is_cron(runnable):
                 item.set_status(state, _status_detail(runnable), self._glyph_frame)
         self._update_log_title()  # uptime ticks; pid/exit code change with the state
 
@@ -652,10 +672,13 @@ class DevpApp(App[None]):
         self.notify("Starting everything", severity="information", timeout=2)
         self.run_worker(self.manager.start_all(), group="bulk", exclusive=True)
 
-    def action_stop_all(self) -> None:
-        """Stop every process and cron schedule, dependents first (bound to 'X')."""
+    def _cancel_autostart(self) -> None:
         if self._autostart is not None:
             self._autostart.cancel()
+
+    def action_stop_all(self) -> None:
+        """Stop every process and cron schedule, dependents first (bound to 'X')."""
+        self._cancel_autostart()
         self.notify("Stopping everything", severity="information", timeout=2)
         # Same exclusive group as start_all: stopping cancels a start-all in progress.
         self.run_worker(self.manager.stop_all(), group="bulk", exclusive=True)
@@ -711,7 +734,7 @@ class DevpApp(App[None]):
         """Offer to reload devp.toml when it's been saved with a meaningful change."""
         if self._reloading or self._config_path is None:
             return
-        stamp = _file_stamp(self._config_path)
+        stamp = file_stamp(self._config_path)
         if stamp is None or stamp == self._config_stamp:
             return
         self._config_stamp = stamp  # asked (or rejected) once per save
@@ -749,31 +772,38 @@ class DevpApp(App[None]):
                 self._autostart.cancel()
             self.workers.cancel_group(self, "bulk")
             await self.manager.shutdown_all()
-
-            self._generation += 1
-            self.manager = ProcessManager(config)
-            self._wire(self.manager)
-            self._process_names = list(self.manager.processes)
-            if self.selected_name not in self.manager.processes:
-                self.selected_name = self._process_names[0] if self._process_names else None
-
-            sidebar = self.query_one("#sidebar", ListView)
-            await sidebar.clear()
-            await sidebar.extend(self._make_list_items())
-            if self.selected_name is not None:
-                sidebar.index = self._process_names.index(self.selected_name)
-            self._search_query = ""
-            self._refresh_log_pane()
-
-            self._autostart = self.run_worker(self.manager.autostart(), name="autostart")
+            await self.adopt_manager(ProcessManager(config))
             self.notify("Config reloaded", severity="information", timeout=3)
             self._show_config_warnings()
         finally:
             self._reloading = False
 
+    async def adopt_manager(self, manager: ProcessManager) -> None:
+        """Switch the UI over to `manager`: rebuild the sidebar and start it (the old one must be stopped)."""
+        if self._autostart is not None:
+            self._autostart.cancel()
+        self._generation += 1
+        self.manager = manager
+        self._wire(manager)
+        self._process_names = list(manager.processes)
+        if self.selected_name not in manager.processes:
+            self.selected_name = self._process_names[0] if self._process_names else None
+
+        sidebar = self.query_one("#sidebar", ListView)
+        await sidebar.clear()
+        await sidebar.extend(self._make_list_items())
+        if self.selected_name is not None:
+            sidebar.index = self._process_names.index(self.selected_name)
+        self._search_query = ""
+        self._refresh_log_pane()
+
+        self._autostart = self.run_worker(manager.autostart(), name="autostart")
+
     async def action_quit(self) -> None:
         """Stop every managed process before exiting, so none are left orphaned."""
         if self._autostart is not None:
             self._autostart.cancel()  # don't let a pending start spawn after shutdown
-        await self.manager.shutdown_all()
-        self.exit()
+        try:
+            await self.manager.shutdown_all()
+        finally:
+            self.exit()

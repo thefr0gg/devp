@@ -11,6 +11,11 @@ your project needs in a `devp.toml` file, then run `devp` to see them all in one
 terminal window: a sidebar to switch between them, live scrolling output, and keys
 to start, stop, and restart each one.
 
+Beyond the TUI, devp can generate a config for your project type
+([`devp init`](#starting-from-a-template)), be driven by scripts and AI agents through
+a [local API](#controlling-devp-from-other-programs), and be used from a
+[browser](#using-devp-in-a-browser).
+
 ## Install
 
 Requires Python 3.11+ and [Poetry](https://python-poetry.org/).
@@ -52,13 +57,60 @@ poetry run devp
 You'll see a sidebar listing `api`, `worker`, and `frontend`. `api` and `worker`
 start automatically; `frontend` waits until you start it yourself.
 
+### Starting from a template
+
+`devp init` shows a menu of templates right in your terminal, drawn in place and erased
+once you choose (not a full-screen UI). Pick one with the arrow keys (or `j`/`k`) and
+press Enter; Esc cancels, and nothing is written. The template that looks like your
+project, judged from the files in the current directory, starts highlighted, so
+usually it's just Enter. The templates:
+
+| Template    | Detected from                                   | Runs                                  |
+|-------------|--------------------------------------------------|----------------------------------------|
+| `react`     | `react`, `react-dom` or `react-scripts` in `package.json` | the `dev` (or `start`) script, port 5173 (Vite) or 3000 (CRA) |
+| `next`      | `next` in `package.json`                         | the `dev` script, port 3000            |
+| `vue`       | `vue` or `nuxt` in `package.json`                | the `dev` (or `serve`) script          |
+| `node`      | any other `package.json`                         | the `dev`, `start` or `serve` script   |
+| `fastapi`   | `fastapi` in `pyproject.toml`, `requirements.txt`, ... | `uvicorn <main:app> --reload`    |
+| `flask`     | `flask` in the same files                        | `flask run --debug`                    |
+| `django`    | `manage.py`                                      | `python manage.py runserver`           |
+| `python`    | other Python projects                            | `main.py` / `app.py` / `python -m pkg` |
+| `go`        | `go.mod`                                         | `go run .`, restarting on `.go` changes |
+| `rust`      | `Cargo.toml`                                     | `cargo run`                            |
+| `docker`    | a Compose file                                   | `docker compose up`                    |
+| `workspace` | a monorepo: subfolders that are projects         | one entry per subfolder, with its own `cwd` |
+| `generic`   | nothing recognized                               | a minimal example to edit              |
+
+JavaScript commands use your package manager: `packageManager` in `package.json` wins,
+then the lockfile (`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `bun.lock`/`bun.lockb`
+→ bun, `package-lock.json` → npm), defaulting to npm. Python commands use `poetry run`,
+`uv run` or `pipenv run` when the project uses them, or set `venv` when there's a
+`.venv`/`venv` folder. In a monorepo each subfolder is detected on its own.
+
+```text
+devp init                      choose a template from the menu
+devp init -t fastapi           skip the menu and use this template
+devp init -p pnpm              force a package manager for JavaScript templates
+devp init --list               print every template
+```
+
+Without a terminal to show the menu (a script or CI), `devp init` uses the template
+that looks like your project instead, or the generic starter if none does.
+
+Always read the result before running it; detection is a good guess, not a promise.
+
 ### Command line
 
 ```text
 devp                      run the nearest devp.toml (here or in a parent directory)
 devp -c path/to/file.toml run a specific config file
-devp init [--force]       create a starter devp.toml here (--force overwrites one)
+devp init [-t NAME] [-p PM] [--force]
+                          create a devp.toml here, from a template matched to the
+                          project (--force overwrites one; --list shows templates)
 devp upgrade-config       record this devp's version and config layout in devp.toml
+devp ctl ACTION [NAME]    control a running devp (see "Controlling devp from other programs")
+devp --no-api             run without the local control API
+devp --web [--port N]     serve the TUI to a browser instead (see "Using devp in a browser")
 devp --version            print the version
 ```
 
@@ -76,8 +128,8 @@ Like `poetry.lock`, `devp.toml` records which versions it was written for, in a
 
 ```toml
 [devp]
-version = "0.2.0"        # devp version that generated this file
-config-version = "1.1"   # config layout version; devp warns when it doesn't match
+version = "0.3.0"        # devp version that generated this file
+config-version = "1.2"   # config layout version; devp warns when it doesn't match
 ```
 
 `config-version` tracks the *layout* of the file, separately from devp's own
@@ -106,6 +158,7 @@ Each process is a `[[process]]` entry:
 | `command`     | yes      | string or list          | —                | See below.                                                         |
 | `cwd`         | no       | string                  | launch directory | Working directory the process runs in.                            |
 | `env`         | no       | table of string→string  | `{}`             | Extra environment variables, merged on top of your existing ones. |
+| `venv`        | no       | string                  | —                | Virtualenv directory to activate: its `bin`/`Scripts` goes first on `PATH` and `VIRTUAL_ENV` is set. Relative to the config's directory. |
 | `autostart`   | no       | boolean                 | `true`           | Whether the process starts automatically when devp launches.      |
 | `autorestart` | no       | boolean                 | `false`          | Automatically restart the process if it crashes (see below).      |
 | `depends_on`  | no       | list of strings         | `[]`             | Other process/cron names that must be running first (see below).  |
@@ -121,6 +174,27 @@ between — slightly faster, and immune to shell quoting surprises:
 command = ["python", "worker.py", "--verbose"]
 ```
 
+#### Environment variables and virtualenvs
+
+`env` sets variables for one process or cron job, on top of devp's own environment
+(an `env` value wins over an inherited one). `venv` points at a Python virtualenv
+directory and activates it the way its `activate` script would: the environment's
+`bin` (`Scripts` on Windows) goes first on `PATH`, `VIRTUAL_ENV` is set, and
+`PYTHONHOME` is dropped. No `source .venv/bin/activate &&` needed, and it works with
+list commands too. Both fields work on `[[process]]` and `[[cron]]` entries.
+
+```toml
+[[process]]
+name = "api"
+command = "uvicorn app:app --reload"
+cwd = "backend"
+venv = "backend/.venv"         # relative to devp.toml's directory, like cwd
+env = { DEBUG = "1", DATABASE_URL = "sqlite:///dev.db" }
+```
+
+Values in `env` must be strings. When both are set, `venv` is applied last, so it
+decides `PATH`'s first entry and `VIRTUAL_ENV`.
+
 #### Choosing the shell
 
 String commands run in the system's default shell (`sh`, or `cmd` on Windows) unless
@@ -133,7 +207,7 @@ shell = "pwsh"                 # every string command runs in PowerShell 7
 
 [[process]]
 name = "api"
-command = "source .venv/bin/activate && uvicorn app:app --reload"
+command = "source scripts/env.sh && uvicorn app:app --reload"
 shell = "bash"                 # this one needs bash
 ```
 
@@ -270,6 +344,7 @@ schedule = "0 * * * *"   # every hour, on the hour
 | `schedule`  | yes      | string               | —                | A standard 5-field cron expression.                                |
 | `cwd`       | no       | string               | launch directory | Working directory each run uses.                                  |
 | `env`       | no       | table of string→string | `{}`           | Extra environment variables for each run.                          |
+| `venv`      | no       | string               | —                | Virtualenv directory to activate for each run, as for processes.   |
 | `enabled`   | no       | boolean              | `true`           | Whether the schedule is active on launch (like a process's `autostart`). |
 | `depends_on`| no       | list of strings      | `[]`             | Other process/cron names that must be running first (see above).  |
 | `shell`     | no       | string or list       | system default   | Shell for a string `command`, as for processes (see above).        |
@@ -278,6 +353,94 @@ Each run's output is appended to the job's log, with a separator line marking wh
 it started, so you can scroll back through the history of previous runs. If a
 scheduled run is still executing when the next scheduled time arrives, that tick is
 skipped — runs never overlap.
+
+## Controlling devp from other programs
+
+While devp runs it serves a small local API, so scripts, editors, and AI agents can
+list, start, stop, and restart your processes and read their logs. Everything shows
+up live in the TUI, as if you had pressed the keys yourself.
+
+From a shell (any directory inside the project):
+
+```text
+devp ctl list                  every process and cron job with its state, pid, restarts
+devp ctl status NAME           one entry
+devp ctl start NAME            start a process (or run a cron job now)  [--wait-ready]
+devp ctl stop NAME
+devp ctl restart NAME          [--wait-ready]
+devp ctl start-all             in dependency order
+devp ctl stop-all              dependents first
+devp ctl logs NAME [-n 100]    recent output, ANSI codes stripped
+devp ctl quit                  stop everything and exit devp
+```
+
+Results are printed as JSON; failures exit non-zero with a message on stderr.
+
+**The protocol.** devp listens on a random port on `127.0.0.1` and writes where, plus
+a secret token, to `.devp-api.json` next to `devp.toml` (readable only by you on
+POSIX; devp deletes it on exit; add it to your `.gitignore`). Connect over TCP and
+send one JSON object per line; you get one JSON line back:
+
+```json
+{"id": 1, "token": "<from .devp-api.json>", "method": "start", "params": {"name": "web"}}
+{"id": 1, "ok": true, "result": {"name": "web", "kind": "process", "state": "running", "pid": 4242, "exit_code": null, "uptime": 0.1, "restarts": 0, "last_error": null}}
+{"id": 2, "ok": false, "error": "no process named 'nope'"}
+```
+
+| Method                        | Params                           | Result                                  |
+|-------------------------------|----------------------------------|-----------------------------------------|
+| `ping`                        | —                                | `{"pong": true, "pid": ...}`            |
+| `list`                        | —                                | list of entries                         |
+| `status` / `start` / `stop` / `restart` | `name`; `wait_ready` (start/restart) | the entry                   |
+| `start_all` / `stop_all`      | —                                | list of entries                         |
+| `logs`                        | `name`, `lines` (100), `raw` (false), `since` | `{"name": ..., "lines": [...], "next": N}` |
+| `sync`                        | `cursors` (name → line cursor)   | `{"epoch", "entries", "logs"}`: everything in one call |
+| `quit`                        | —                                | `{"quitting": true}`, then devp exits   |
+
+`next` is a cursor: pass it back as `since` to receive only lines written after it, once
+each, which is how to follow a log. `sync` is what the browser view polls; `epoch`
+changes when devp reloads its config, so a client knows its entries are stale.
+
+Cron entries also carry `schedule` and `next_run_at`. Requests without the right
+token are rejected, and only processes already in `devp.toml` can be started, so the
+API can't be used to run arbitrary commands. Anything that can read the token file
+can control devp, so don't put it somewhere shared. Run `devp --no-api` to turn the
+API off. If two devp instances run from the same config, the later one's file wins.
+
+## Using devp in a browser
+
+```text
+devp --web                    serve on http://localhost:8000
+devp --web --port 9000
+devp --web --host 0.0.0.0     reachable from other machines (read the warning below)
+```
+
+`devp --web` runs your processes without a terminal UI and serves the same TUI to a
+browser (via [textual-serve](https://github.com/Textualize/textual-serve)). It prints
+a short banner with a URL that includes an access token; open that. Afterwards the
+terminal shows one line per event instead of raw HTTP logs: browser tabs connecting
+and leaving, processes starting, stopping and failing, config reloads, and blocked
+requests (wrong token). The web mode always runs the control API (see
+above), so `--web` can't be combined with `--no-api`, and `devp ctl` works alongside it.
+
+The processes belong to the `devp --web` process, not to a browser tab: any number of
+tabs show and control the same processes, closing a tab leaves them running, and
+`q` in the browser only closes that view. Stop everything with Ctrl+C in the terminal
+that runs `devp --web` (or `devp ctl quit`).
+
+**Security.** The web UI can start and stop your processes, so it needs the token
+printed at startup (kept in a cookie after the first visit) and binds to `localhost`
+by default. Plain HTTP is not encrypted. To use it from another machine, prefer an SSH
+tunnel (`ssh -L 8000:localhost:8000 host`) over `--host 0.0.0.0`; if you do bind a
+public address, the token travels in clear text unless you add TLS in front of it
+(`public_url` links also assume the address you passed to `--host`).
+
+**Editing the config.** Like the terminal UI, `devp --web` watches `devp.toml`. When it's
+saved with a meaningful change (comments and whitespace don't count), devp stops every
+process and starts the new set, and open browser tabs rebuild their process list on
+their own. Because nobody is at the terminal to ask, a changed config is applied
+right away instead of after a confirmation prompt. If the new file is invalid, devp
+prints the error in its terminal and keeps running the previous config.
 
 ## Using the TUI
 
@@ -358,18 +521,6 @@ an error toast explaining why, in addition to the sidebar turning red.
 
 When you quit devp — with `q`, or `Ctrl+C` with nothing selected — every process it started is stopped
 first, so nothing keeps running in the background after you close the terminal.
-
-## Known limitations
-
-- On Windows, a graceful stop needs a real console attached to deliver
-  `CTRL_BREAK_EVENT` (true for a normal interactive terminal session). If none is
-  attached — some task runners and detached-service contexts — devp skips straight
-  to a hard kill rather than waiting out the stop timeout for a signal that could
-  never arrive. Even with a console, `CTRL_BREAK_EVENT` only works for processes
-  that handle it (Python, Node, and most console apps do); an unresponsive process
-  still gets a hard kill once the stop timeout elapses.
-- Log search/filtering across multiple processes at once isn't supported — search
-  always applies to whichever process's log is currently selected.
 
 ## License
 

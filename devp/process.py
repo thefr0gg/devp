@@ -55,6 +55,20 @@ def _fallback_encoding() -> str:
 _FALLBACK_ENCODING = _fallback_encoding()
 
 
+def activate_venv(env: dict[str, str], venv: str) -> None:
+    """Activate the virtualenv at `venv` in `env`, as its `activate` script would.
+
+    Sets VIRTUAL_ENV, puts its executables directory first on PATH, and drops
+    PYTHONHOME. PATH is matched case-insensitively on Windows, where it is `Path`.
+    """
+    root = os.path.abspath(venv)
+    bin_dir = os.path.join(root, "Scripts" if _IS_WINDOWS else "bin")
+    path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    env["VIRTUAL_ENV"] = root
+    env[path_key] = os.pathsep.join(filter(None, [bin_dir, env.get(path_key)]))
+    env.pop("PYTHONHOME", None)
+
+
 def decode_output(raw: bytes) -> str:
     """Decode one line of process output: UTF-8, or the platform's legacy encoding."""
     try:
@@ -110,6 +124,7 @@ class ManagedProcess:
         self.exit_code: int | None = None
         self.last_error: str | None = None
         self.output: deque[str] = deque(maxlen=MAX_BUFFER_LINES)
+        self.lines_total = 0  # every line ever appended: a cursor that survives the buffer's trimming
         self._proc: asyncio.subprocess.Process | None = None
         self._pump_task: asyncio.Task[None] | None = None
         self._wait_task: asyncio.Task[None] | None = None
@@ -137,6 +152,7 @@ class ManagedProcess:
     def log(self, line: str) -> None:
         """Append an arbitrary line (e.g. a run separator) to the buffer without spawning anything."""
         self.output.append(line)
+        self.lines_total += 1
         if self.on_output is not None:
             self.on_output(self.config.name, line)
 
@@ -166,6 +182,8 @@ class ManagedProcess:
             self._restart_task = None
 
         env = {**os.environ, **self.config.env}
+        if self.config.venv is not None:
+            activate_venv(env, self.config.venv)
         # Python children default to the console's legacy code page when writing to a
         # pipe on Windows, where printing an emoji raises UnicodeEncodeError. Ask them
         # for UTF-8 unless the environment already says otherwise.
@@ -314,6 +332,7 @@ class ManagedProcess:
         """Record one line of output: decoded, with in-place redraws collapsed."""
         line = resolve_overwrites(decode_output(raw).rstrip("\r").replace("\ufeff", ""))
         self.output.append(line)
+        self.lines_total += 1
         if self.on_output is not None:
             self.on_output(self.config.name, line)
         if (

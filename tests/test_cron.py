@@ -114,3 +114,38 @@ async def test_state_change_callback_fires_with_translated_state():
 
     assert ProcessState.RUNNING in seen
     assert seen[-1] == ProcessState.SCHEDULED
+
+
+async def test_venv_is_active_during_a_run(tmp_path):
+    venv = tmp_path / ".venv"
+    config = CronConfig(
+        name="job",
+        command=python_command("import os; print('VE=' + os.environ['VIRTUAL_ENV'])"),
+        schedule=_FAR_FUTURE_SCHEDULE,
+        venv=str(venv),
+    )
+    job = CronJob(config)
+
+    await job.start()
+    await job._process.wait()
+
+    assert f"VE={venv}" in job.output
+
+
+async def test_env_vars_reach_each_run():
+    config = CronConfig(
+        name="job",
+        command=python_command("import os; print('E=' + os.environ['DEVP_TEST_CRON'])"),
+        schedule=_FAR_FUTURE_SCHEDULE,
+        env={"DEVP_TEST_CRON": "hello"},
+    )
+    job = CronJob(config)
+
+    await job.start()
+    await job._process.wait()
+    assert "E=hello" in job.output
+
+    job.output.clear()
+    await job.start()  # a second run still gets them
+    await job._process.wait()
+    assert "E=hello" in job.output

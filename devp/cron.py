@@ -37,6 +37,7 @@ class CronJob:
                 env=config.env,
                 autostart=False,
                 shell=config.shell,
+                venv=config.venv,
             ),
             on_output=on_output,
             on_state_change=self._handle_inner_state_change,
@@ -47,6 +48,10 @@ class CronJob:
     @property
     def output(self) -> deque[str]:
         return self._process.output
+
+    @property
+    def lines_total(self) -> int:
+        return self._process.lines_total
 
     @property
     def exit_code(self) -> int | None:
