@@ -450,3 +450,54 @@ def test_version_metadata_does_not_affect_config_equality(tmp_path):
     plain = load_config(write_config(tmp_path, PROCESS))
     stamped = load_config(write_config(tmp_path, with_versions(CONFIG_VERSION, "0.1.0")))
     assert plain == stamped
+
+
+def test_venv_is_parsed_for_processes_and_crons(tmp_path):
+    path = tmp_path / "devp.toml"
+    path.write_text(
+        '[[process]]\nname = "a"\ncommand = "x"\nvenv = ".venv"\n'
+        '[[cron]]\nname = "b"\ncommand = "x"\nschedule = "* * * * *"\nvenv = "v"\n'
+    )
+    config = load_config(path)
+    assert config.processes[0].venv == ".venv"
+    assert config.crons[0].venv == "v"
+
+
+def test_venv_must_be_a_non_empty_string(tmp_path):
+    path = tmp_path / "devp.toml"
+    path.write_text('[[process]]\nname = "a"\ncommand = "x"\nvenv = 3\n')
+    with pytest.raises(ConfigError, match="'venv' must be a non-empty string"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "env_line",
+    ['env = "DEBUG=1"', "env = { DEBUG = 1 }", "env = { DEBUG = true }", 'env = ["A=1"]'],
+)
+def test_process_env_must_be_a_table_of_strings(tmp_path, env_line):
+    path = tmp_path / "devp.toml"
+    path.write_text(f'[[process]]\nname = "a"\ncommand = "x"\n{env_line}\n')
+    with pytest.raises(ConfigError, match="'env' must be a table of string to string"):
+        load_config(path)
+
+
+def test_cron_env_must_be_a_table_of_strings(tmp_path):
+    path = tmp_path / "devp.toml"
+    path.write_text(
+        '[[cron]]\nname = "a"\ncommand = "x"\nschedule = "* * * * *"\nenv = { N = 1 }\n'
+    )
+    with pytest.raises(ConfigError, match="'env' must be a table of string to string"):
+        load_config(path)
+
+
+def test_env_is_per_entry_and_not_shared(tmp_path):
+    path = tmp_path / "devp.toml"
+    path.write_text(
+        '[[process]]\nname = "a"\ncommand = "x"\nenv = { A = "1" }\n'
+        '[[process]]\nname = "b"\ncommand = "x"\n'
+        '[[cron]]\nname = "c"\ncommand = "x"\nschedule = "* * * * *"\nenv = { C = "3" }\n'
+    )
+    config = load_config(path)
+    assert config.processes[0].env == {"A": "1"}
+    assert config.processes[1].env == {}
+    assert config.crons[0].env == {"C": "3"}

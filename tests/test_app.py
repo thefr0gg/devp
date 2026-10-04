@@ -427,8 +427,9 @@ async def test_log_title_shows_live_process_details():
         await _wait_for(lambda: "restarts 1" in str(log_pane.border_title))
 
         await sleeper.stop()
-        await _wait_for(lambda: "pid" not in str(log_pane.border_title))
-        assert "exit" in log_pane.border_title
+        # "pid" goes as soon as the stop begins; the exit code arrives a moment later.
+        await _wait_for(lambda: "exit" in str(log_pane.border_title))
+        assert "pid" not in log_pane.border_title
         await app.manager.shutdown_all()
 
 
@@ -549,3 +550,14 @@ async def test_config_version_warnings_are_shown_as_toasts():
         await pilot.pause()
         [toast] = [n for n in app._notifications if n.title == "Config version"]
         assert toast.severity == "warning" and "config-version" in toast.message
+
+
+async def test_exiting_without_action_quit_still_stops_running_processes():
+    app = make_app()
+    sleeper = app.manager.processes["sleeper"]
+    async with app.run_test() as pilot:
+        await sleeper.start()
+        await _wait_for(lambda: sleeper.state == ProcessState.RUNNING)
+        app.exit()  # e.g. SIGTERM or a closed terminal: bypasses action_quit
+        await pilot.pause()
+    assert sleeper.state == ProcessState.STOPPED

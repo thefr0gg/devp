@@ -392,3 +392,98 @@ async def test_non_utf8_output_uses_the_fallback_encoding(monkeypatch):
     monkeypatch.setattr(process_module, "_FALLBACK_ENCODING", "cp1252")
     output = await collect("import sys; sys.stdout.buffer.write('café\\n'.encode('cp1252'))")
     assert output == ["café"]
+
+
+async def test_activate_venv_sets_virtual_env_and_prepends_path(tmp_path):
+    import os
+
+    from devp.process import activate_venv
+
+    env = {"PATH": "/usr/bin", "PYTHONHOME": "/x"}
+    activate_venv(env, str(tmp_path / ".venv"))
+    root = str(tmp_path / ".venv")
+    assert env["VIRTUAL_ENV"] == root
+    assert env["PATH"].split(os.pathsep)[0] in (
+        os.path.join(root, "bin"),
+        os.path.join(root, "Scripts"),
+    )
+    assert env["PATH"].endswith("/usr/bin")
+    assert "PYTHONHOME" not in env
+
+
+async def test_venv_is_active_in_the_spawned_process(tmp_path):
+    config = ProcessConfig(
+        name="v",
+        command=[sys.executable, "-c", "import os; print('VE=' + os.environ['VIRTUAL_ENV'])"],
+        venv=str(tmp_path / ".venv"),
+        autostart=False,
+    )
+    proc = ManagedProcess(config)
+    await proc.start()
+    for _ in range(100):
+        if proc.state != ProcessState.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+    assert any(line == f"VE={tmp_path / '.venv'}" for line in proc.output)
+
+
+async def _output_of(config: ProcessConfig) -> list[str]:
+    proc = ManagedProcess(config)
+    await proc.start()
+    for _ in range(100):
+        if proc.state != ProcessState.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+    return list(proc.output)
+
+
+async def test_env_vars_reach_the_process_and_override_inherited_ones(monkeypatch):
+    monkeypatch.setenv("DEVP_TEST_INHERITED", "from-parent")
+    monkeypatch.setenv("DEVP_TEST_OVERRIDDEN", "from-parent")
+    code = (
+        "import os; "
+        "print('A=' + os.environ['DEVP_TEST_A']); "
+        "print('I=' + os.environ['DEVP_TEST_INHERITED']); "
+        "print('O=' + os.environ['DEVP_TEST_OVERRIDDEN'])"
+    )
+    output = await _output_of(
+        ProcessConfig(
+            name="e",
+            command=python_command(code),
+            env={"DEVP_TEST_A": "1", "DEVP_TEST_OVERRIDDEN": "from-config"},
+            autostart=False,
+        )
+    )
+    assert output == ["A=1", "I=from-parent", "O=from-config"]
+
+
+async def test_env_does_not_leak_into_the_parent_environment():
+    import os
+
+    await _output_of(
+        ProcessConfig(
+            name="e",
+            command=python_command("pass"),
+            env={"DEVP_TEST_LEAK": "1"},
+            autostart=False,
+        )
+    )
+    assert "DEVP_TEST_LEAK" not in os.environ
+
+
+async def test_env_and_venv_combine_with_venv_winning_on_path(tmp_path):
+    import os
+
+    venv = tmp_path / ".venv"
+    code = "import os; print('X=' + os.environ['DEVP_TEST_X']); print(os.environ['PATH'])"
+    output = await _output_of(
+        ProcessConfig(
+            name="e",
+            command=python_command(code),
+            env={"DEVP_TEST_X": "y", "PATH": os.environ["PATH"]},
+            venv=str(venv),
+            autostart=False,
+        )
+    )
+    assert output[0] == "X=y"
+    assert output[1].split(os.pathsep)[0] in (str(venv / "bin"), str(venv / "Scripts"))

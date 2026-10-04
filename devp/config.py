@@ -10,7 +10,7 @@ from typing import Any
 
 from devp import __version__
 
-CONFIG_VERSION = "1.1"
+CONFIG_VERSION = "1.2"
 """The layout version of devp.toml, recorded in its `[devp]` table as `config-version`.
 
 Bump the minor part for a backward-compatible layout change (a new optional key, say)
@@ -21,6 +21,7 @@ whose major version differs, like Poetry does with its lock files.
 History:
 - 1.0: the initial layout.
 - 1.1: `shell` on processes and cron jobs, and a `[defaults]` table.
+- 1.2: `venv` on processes and cron jobs.
 """
 
 
@@ -44,6 +45,7 @@ class ProcessConfig:
     ready_timeout: float = 60.0
     watch: list[str] = field(default_factory=list)  # globs; restart the process on changes
     shell: str | list[str] | None = None  # for string commands; None = the system default
+    venv: str | None = None  # virtualenv directory to activate for the process
 
     @property
     def has_ready_check(self) -> bool:
@@ -62,6 +64,7 @@ class CronConfig:
     enabled: bool = True
     depends_on: list[str] = field(default_factory=list)
     shell: str | list[str] | None = None
+    venv: str | None = None
 
 
 EntryConfig = ProcessConfig | CronConfig
@@ -78,6 +81,17 @@ class Config:
     devp_version: str | None = field(default=None, compare=False)
     config_version: str | None = field(default=None, compare=False)
     warnings: list[str] = field(default_factory=list, compare=False)
+
+
+def file_stamp(path: Path | None) -> tuple[int, int] | None:
+    """A cheap fingerprint of a file (mtime, size) to notice it being saved."""
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
 
 
 def _display_path(path: Path) -> str:
@@ -118,6 +132,13 @@ def _validate_cwd(entry: dict[str, Any], location: str, name: str) -> str | None
     if cwd is not None and not isinstance(cwd, str):
         raise ConfigError(f"{location} ('{name}'): 'cwd' must be a string")
     return cwd
+
+
+def _validate_venv(entry: dict[str, Any], location: str, name: str) -> str | None:
+    venv = entry.get("venv")
+    if venv is not None and (not isinstance(venv, str) or not venv.strip()):
+        raise ConfigError(f"{location} ('{name}'): 'venv' must be a non-empty string")
+    return venv
 
 
 def _validate_env(entry: dict[str, Any], location: str, name: str) -> dict[str, str]:
@@ -228,6 +249,7 @@ def _parse_process(
         **_validate_ready(entry, location, name),
         watch=_validate_watch(entry, location, name),
         shell=_entry_shell(entry, location, name, command, default_shell),
+        venv=_validate_venv(entry, location, name),
     )
 
 
@@ -254,6 +276,7 @@ def _parse_cron(
         enabled=_validate_bool(entry, "enabled", location, name, default=True),
         depends_on=_validate_depends_on(entry, location, name),
         shell=_entry_shell(entry, location, name, command, default_shell),
+        venv=_validate_venv(entry, location, name),
     )
 
 

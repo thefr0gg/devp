@@ -157,3 +157,63 @@ def test_stamping_never_moves_top_level_keys_into_the_devp_table():
 
     data = tomllib.loads(stamp_versions("top = 1\n" + MINIMAL))
     assert data["top"] == 1 and "top" not in data["devp"]
+
+
+def test_ctl_without_a_running_devp_fails_clearly(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["ctl", "list"])
+    assert exc.value.code == 1
+    assert "no running devp found" in capsys.readouterr().err
+
+
+def test_ctl_needs_a_name_for_per_process_actions(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["ctl", "start"])
+    assert exc.value.code == 2
+    assert "needs a process name" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_ctl_prints_the_json_result_from_a_running_devp(tmp_path, monkeypatch, capsys):
+    import asyncio
+    import json
+    import sys
+
+    from devp.api import API_FILE_NAME, ControlServer
+    from devp.config import Config, ProcessConfig
+    from devp.manager import ProcessManager
+
+    manager = ProcessManager(
+        Config(
+            processes=[
+                ProcessConfig(
+                    name="web",
+                    command=[sys.executable, "-c", "import time; time.sleep(30)"],
+                    autostart=False,
+                )
+            ],
+            crons=[],
+        )
+    )
+    manager.build()
+
+    async def noop() -> None:
+        pass
+
+    server = ControlServer(lambda: manager, noop)
+    await server.start(tmp_path / API_FILE_NAME)
+    monkeypatch.chdir(tmp_path)
+    try:
+        await asyncio.to_thread(main, ["ctl", "start", "web"])
+        assert json.loads(capsys.readouterr().out)["state"] == "running"
+        await asyncio.to_thread(main, ["ctl", "list"])
+        assert json.loads(capsys.readouterr().out)[0]["name"] == "web"
+        with pytest.raises(SystemExit) as exc:
+            await asyncio.to_thread(main, ["ctl", "stop", "nope"])
+        assert exc.value.code == 1
+        assert "no process named 'nope'" in capsys.readouterr().err
+    finally:
+        await manager.shutdown_all()
+        await server.stop()
